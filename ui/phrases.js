@@ -5,6 +5,7 @@
   var S = { phrases: [], active: false, ready: false, disposed: false, subs: [], outbox: [], error: '', menuClicks: 0, scriptError: '', lastEvent: '' };
   window.__winvPlus = S;
   var root, navItem, navHandler, view, list, status, observer, selectedBefore = [], nativeItems = [];
+  var cards = new Map(), removal;
   var saveActionId = 'winvplus-save';
 
   function el(tag, cls, text) {
@@ -22,7 +23,7 @@
     return {
       visible: !root || !ko.isObservable(root.isLastShowHideEventShow) || root.isLastShowHideEventShow(),
       menuClicks: S.menuClicks,
-      uiState: JSON.stringify({active:S.active,event:S.lastEvent,error:S.scriptError,visible:root && ko.unwrap(root.isLastShowHideEventShow),viewId:root && ko.unwrap(root.currentViewId),nav:rootNav() ? rootNav().offsetHeight : -1,view:view ? view.offsetHeight : -1}),
+      uiState: JSON.stringify({version:'incremental-2',active:S.active,event:S.lastEvent,error:S.scriptError,transition:S.lastTransition,animation:S.lastAnimation,created:S.created,visible:root && ko.unwrap(root.isLastShowHideEventShow),viewId:root && ko.unwrap(root.currentViewId),nav:rootNav() ? rootNav().offsetHeight : -1,view:view ? view.offsetHeight : -1}),
       requests: S.outbox.splice(0)
     };
   };
@@ -31,8 +32,9 @@
     status.textContent = text;
     status.setAttribute('role', 'status');
   }
-  function setActive(active) {
+  function setActive(active, reason) {
     if (S.active === active) return;
+    S.lastTransition = reason || (active ? 'open' : 'close');
     S.active = active;
     document.body.classList.toggle('winvplus-phrases-open', active);
     navItem.isSelected(active);
@@ -50,15 +52,32 @@
     }
   }
   function render() {
-    if (!list) return;
-    while (list.firstChild) list.removeChild(list.firstChild);
+    if (!list || removal) return;
+    var wanted = new Set(S.phrases.map(function (phrase) { return phrase.id; }));
+    cards.forEach(function (card, id) {
+      if (!wanted.has(id)) { card.parentNode.removeChild(card); cards.delete(id); }
+    });
+    var empty = list.querySelector('.winvplus-empty');
+    if (S.phrases.length && empty) empty.parentNode.removeChild(empty);
     if (!S.phrases.length) {
-      var empty = el('div', 'winvplus-empty');
-      empty.appendChild(el('div', 'winvplus-empty-icon', '\uE734'));
-      empty.appendChild(el('p', '', '右键剪贴板记录，添加到这里'));
-      list.appendChild(empty);
+      if (!empty) {
+        empty = el('div', 'winvplus-empty');
+        empty.appendChild(el('div', 'winvplus-empty-icon', '\uE734'));
+        empty.appendChild(el('p', '', '右键剪贴板记录，添加到这里'));
+        list.appendChild(empty);
+      }
     }
+    var next = list.firstChild;
     S.phrases.slice().reverse().forEach(function (phrase) {
+      var card = cards.get(phrase.id);
+      if (!card) { card = createCard(phrase); cards.set(phrase.id, card); }
+      if (card !== next) list.insertBefore(card, next);
+      next = card.nextSibling;
+    });
+    tell(S.error || (S.phrases.length ? S.phrases.length + ' 条' : ''));
+  }
+  function createCard(phrase) {
+      S.created = (S.created || 0) + 1;
       var card = el('li', 'expanded-view-list-item clipboard-history-items-list-item winvplus-card');
       var paste = el('div', 'clipboard-history-items-list-item-content winvplus-paste');
       paste.tabIndex = 0;
@@ -78,13 +97,48 @@
       var remove = el('li', 'clipboard-history-items-list-item-action winvplus-remove');
       remove.tabIndex = 0; remove.setAttribute('role', 'button'); remove.setAttribute('aria-label', '移出常用语');
       remove.appendChild(el('span', 'clipboard-history-items-list-item-action-icon winvplus-action-icon', '\uE74D'));
-      remove.addEventListener('click', function (e) { e.stopPropagation(); ++S.menuClicks; S.lastEvent = 'remove'; send('remove', { id: phrase.id }); });
+      remove.addEventListener('mousedown', function (e) { e.preventDefault(); });
+      remove.addEventListener('click', function (e) { e.stopPropagation(); removePhrase(card, phrase.id); });
       remove.addEventListener('keydown', function (e) {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); remove.click(); }
       });
-      actions.appendChild(remove); paste.appendChild(actions); card.appendChild(paste); list.appendChild(card);
-    });
-    tell(S.error || (S.phrases.length ? S.phrases.length + ' 条' : ''));
+      actions.appendChild(remove); paste.appendChild(actions); card.appendChild(paste);
+      return card;
+  }
+  // Reuse Windows' existing shrink/fade/shift rules without clearing the list.
+  function removePhrase(card, id) {
+    if (removal) return;
+    var following = [], sibling = card.nextSibling;
+    while (sibling) { following.push(sibling); sibling = sibling.nextSibling; }
+    var job = removal = { card: card, following: following, animated: false, saved: false };
+    card.querySelector('.winvplus-remove').setAttribute('aria-disabled', 'true');
+    card.classList.add('clipboard-history-items-list-item-remove-item-target-item');
+    following.forEach(function (node) { node.classList.add('clipboard-history-items-list-item-remove-item-move-up-subsequent-item'); });
+    var last = following.length ? following[following.length - 1] : card;
+    var animation = following.length ? 'clipboardHistoryRemoveItemMoveUpSubsequentItems' : 'clipboardHistoryRemoveItemTargetItemShrink';
+    function done(event) {
+      if (event && (event.target !== last || event.animationName !== animation)) return;
+      clearTimeout(job.timer);
+      last.removeEventListener('animationend', done);
+      job.animated = true;
+      if (job.saved) finishRemoval();
+    }
+    job.stop = function () { clearTimeout(job.timer); last.removeEventListener('animationend', done); };
+    last.addEventListener('animationend', done);
+    ++S.menuClicks; S.lastEvent = 'remove'; send('remove', { id: id });
+    // Closing the panel can cancel animationend. Disabled system animations finish immediately.
+    S.lastAnimation = window.getComputedStyle(last).animationDuration;
+    if (parseFloat(S.lastAnimation) > 0) job.timer = setTimeout(done, 450);
+    else done();
+  }
+  function finishRemoval() {
+    var job = removal;
+    job.stop();
+    job.card.classList.remove('clipboard-history-items-list-item-remove-item-target-item');
+    job.card.querySelector('.winvplus-remove').removeAttribute('aria-disabled');
+    job.following.forEach(function (node) { node.classList.remove('clipboard-history-items-list-item-remove-item-move-up-subsequent-item'); });
+    removal = null;
+    render();
   }
   // Extend the native observable action list. Windows owns rendering and interaction.
   function addNativeAction(item) {
@@ -133,15 +187,21 @@
     var more = card.querySelector('.clipboard-history-items-list-item-actions-primary-view .clipboard-history-items-list-item-action');
     if (more) more.click();
   }
-  function onNav(e) {
-    var tab = document.getElementById(navItem.containerHtmlId);
-    if (!tab || !tab.contains(e.target)) setActive(false);
-  }
   function onScriptError(e) { S.scriptError = e.message || String(e.reason || e.error || 'Unknown script error'); }
   S.receive = function (message) {
-    if (message.error) { S.error = message.error; tell(message.error); return; }
+    if (message.error) {
+      S.error = message.error;
+      if (message.action === 'remove' && removal) finishRemoval();
+      tell(message.error); return;
+    }
     if (message.action !== 'load') S.error = '';
-    if (message.phrases) { S.phrases = message.phrases; render(); }
+    if (message.phrases) {
+      S.phrases = message.phrases;
+      if (message.action === 'remove' && removal) {
+        removal.saved = true;
+        if (removal.animated) finishRemoval();
+      } else render();
+    }
     if (message.action === 'paste') {
       root.delegationModel.doCtrlVKeyInjectAsync().catch(function () { S.error = '粘贴失败'; tell(S.error); });
     }
@@ -150,9 +210,9 @@
   S.dispose = function () {
     S.disposed = true;
     clearInterval(S.timer);
+    if (removal) { removal.stop(); removal = null; }
     if (S.ready) {
       setActive(false);
-      rootNav().removeEventListener('click', onNav, true);
       document.removeEventListener('contextmenu', onContext, true);
       window.removeEventListener('error', onScriptError);
       window.removeEventListener('unhandledrejection', onScriptError);
@@ -164,6 +224,7 @@
       var index = nav.customNavigationMenuClickHandlers.indexOf(navHandler);
       if (index >= 0) nav.customNavigationMenuClickHandlers.splice(index, 1);
       [view, document.getElementById('winvplus-style')].forEach(function (n) { if (n && n.parentNode) n.parentNode.removeChild(n); });
+      cards.clear();
     }
     delete window.__winvPlus;
   };
@@ -208,7 +269,7 @@
         return result;
       },
       onNavigationMenuItemClick: function (item) {
-        if (item.id !== navItem.id) return false;
+        if (item.id !== navItem.id) { setActive(false, 'navigation:' + item.id); return false; }
         setActive(true); return true;
       }
     };
@@ -225,13 +286,12 @@
     headerContent.appendChild(el('span', 'category-header-text', '常用语'));
     status = el('span', 'winvplus-status'); headerContent.appendChild(status); heading.appendChild(headerContent);
     list = el('ul', 'clipboard-history-items-list winvplus-list'); view.appendChild(heading); view.appendChild(list); content.appendChild(view);
-    nav.addEventListener('click', onNav, true);
     document.addEventListener('contextmenu', onContext, true);
     window.addEventListener('error', onScriptError);
     window.addEventListener('unhandledrejection', onScriptError);
-    if (ko.isObservable(root.currentViewId)) S.subs.push(root.currentViewId.subscribe(function () { setActive(false); }));
+    if (ko.isObservable(root.currentViewId)) S.subs.push(root.currentViewId.subscribe(function (id) { setActive(false, 'view:' + id); }));
     // Release the native list before Windows begins its close/navigation animations.
-    if (ko.isObservable(root.isLastShowHideEventShow)) S.subs.push(root.isLastShowHideEventShow.subscribe(function (visible) { if (!visible) setActive(false); }));
+    if (ko.isObservable(root.isLastShowHideEventShow)) S.subs.push(root.isLastShowHideEventShow.subscribe(function (visible) { if (!visible) setActive(false, 'window-hide'); }));
     scanHistory();
     observer = new window.MutationObserver(scanHistory);
     observer.observe(document.getElementById('expanded-view-content-lists'), { childList: true, subtree: true });
