@@ -276,7 +276,7 @@ function drainRequests(window) {
   return JSON.parse(JSON.stringify(window.__winvPlus.drain().requests));
 }
 
-test('adds one native tab after clipboard, avoids duplicate injection, and adds text by id only', (t) => {
+test('adds one native tab, adds text and image records by id, and renders image previews', (t) => {
   const fixture = createFixture();
   t.after(() => fixture.dom.window.close());
   const { window, document, navModel, root } = fixture;
@@ -312,12 +312,27 @@ test('adds one native tab after clipboard, avoids duplicate injection, and adds 
 
   const imageItem = fixture.addImageHistoryItem('clipboard-image-7');
   const imageEvent = dispatchContextMenu(window, imageItem.image);
-  assert.equal(imageEvent.defaultPrevented, false);
-  assert.equal(document.getElementById('winvplus-menu').hidden, true);
-  assert.deepEqual(drainRequests(window), []);
+  assert.equal(imageEvent.defaultPrevented, true);
+  const imageAddAction = document.querySelector('#winvplus-menu [role="menuitem"]');
+  assert.ok(imageAddAction);
+  assert.equal(imageAddAction.textContent, '添加到常用语');
+  imageAddAction.click();
+  assert.deepEqual(drainRequests(window), [
+    { action: 'add', id: 'clipboard-image-7' },
+  ]);
+
+  const preview = 'data:image/png;base64,aGVsbG8=';
+  window.__winvPlus.receive({ phrases: [{ id: 'clipboard-image-7', type: 'image', preview }] });
+  const imagePhrase = document.querySelector('.winvplus-card .winvplus-paste');
+  const previewImage = imagePhrase.querySelector('img.clipboard-history-items-list-item-image');
+  assert.ok(previewImage);
+  assert.equal(previewImage.src, preview);
+  assert.equal(previewImage.alt, '保存的图片');
+  assert.equal(imagePhrase.getAttribute('role'), 'button');
+  assert.equal(imagePhrase.querySelector('.clipboard-history-items-list-item-text'), null);
 });
 
-test('renders long phrase text safely, sends paste and remove messages, and invokes paste completion', async (t) => {
+test('renders text safely, supports keyboard paste, keeps remove separate, and uses legacy menu hover selectors', async (t) => {
   const fixture = createFixture();
   t.after(() => fixture.dom.window.close());
   const { window, document } = fixture;
@@ -326,18 +341,32 @@ test('renders long phrase text safely, sends paste and remove messages, and invo
 
   const phraseText = '<img src=x onerror="window.injected=true">\n' + '长文字'.repeat(3000);
   window.__winvPlus.receive({ phrases: [{ id: 'phrase-1', text: phraseText }] });
-  const pasteButton = document.querySelector('.winvplus-card .winvplus-paste');
-  assert.ok(pasteButton);
-  assert.equal(pasteButton.textContent, phraseText);
-  assert.equal(pasteButton.title, phraseText);
-  assert.equal(pasteButton.querySelector('img'), null);
+  const pasteControl = document.querySelector('.winvplus-card .winvplus-paste');
+  assert.ok(pasteControl);
+  assert.equal(pasteControl.tagName, 'DIV');
+  assert.equal(pasteControl.getAttribute('role'), 'button');
+  const textSpan = pasteControl.querySelector('span.clipboard-history-items-list-item-text');
+  assert.ok(textSpan);
+  assert.equal(textSpan.textContent, phraseText);
+  assert.equal(pasteControl.title, phraseText);
+  assert.equal(pasteControl.querySelector('img'), null);
   assert.equal(document.querySelector('body > img'), null);
   assert.equal(window.injected, undefined);
 
-  pasteButton.click();
+  pasteControl.click();
   assert.deepEqual(drainRequests(window), [
     { action: 'paste', id: 'phrase-1' },
   ]);
+
+  for (const key of ['Enter', ' ']) {
+    const event = new window.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+    pasteControl.dispatchEvent(event);
+    assert.equal(event.defaultPrevented, true);
+    assert.deepEqual(drainRequests(window), [
+      { action: 'paste', id: 'phrase-1' },
+    ]);
+  }
+
   window.__winvPlus.receive({ action: 'paste' });
   await Promise.resolve();
   assert.equal(fixture.pasteCalls, 1);
@@ -346,6 +375,13 @@ test('renders long phrase text safely, sends paste and remove messages, and invo
   const removeAction = document.querySelector('#winvplus-menu [role="menuitem"]');
   assert.ok(removeAction);
   assert.equal(removeAction.textContent, '移出常用语');
+  const style = document.getElementById('winvplus-style').textContent;
+  assert.match(style, /\.winvplus-menu-item:hover,\.winvplus-menu-item\.winvplus-hover/);
+  assert.equal(style.includes(':focus-visible'), false);
+  removeAction.dispatchEvent(new window.Event('pointerenter'));
+  assert.equal(removeAction.classList.contains('winvplus-hover'), true);
+  removeAction.dispatchEvent(new window.Event('pointerleave'));
+  assert.equal(removeAction.classList.contains('winvplus-hover'), false);
   removeAction.click();
   assert.deepEqual(drainRequests(window), [
     { action: 'remove', id: 'phrase-1' },

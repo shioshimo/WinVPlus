@@ -25,6 +25,9 @@
 #include <winrt/Windows.ApplicationModel.DataTransfer.h>
 #include <winrt/Windows.Data.Json.h>
 #include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Graphics.Imaging.h>
+#include <winrt/Windows.Security.Cryptography.h>
+#include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
 #include <winrt/Windows.UI.Xaml.Media.h>
 
@@ -33,6 +36,8 @@ namespace dt = winrt::Windows::ApplicationModel::DataTransfer;
 namespace json = winrt::Windows::Data::Json;
 namespace xaml = winrt::Windows::UI::Xaml;
 namespace controls = xaml::Controls;
+namespace imaging = winrt::Windows::Graphics::Imaging;
+namespace streams = winrt::Windows::Storage::Streams;
 
 constexpr wchar_t kPageScript[] = LR"WINVPLUS(/* @ui-script */)WINVPLUS";
 std::atomic<bool> g_unloading = false;
@@ -92,6 +97,30 @@ std::filesystem::path StorePath() {
     return std::filesystem::path(localAppData) / L"WinVPlus" / L"phrases.json";
 }
 
+std::filesystem::path ImagePath(winrt::hstring const& id) {
+    GUID guid; winrt::check_hresult(CLSIDFromString(id.c_str(), &guid));
+    wchar_t key[40]; StringFromGUID2(guid, key, ARRAYSIZE(key));
+    return StorePath().parent_path() / L"images" / (std::wstring(key) + L".png");
+}
+
+wf::IAsyncOperation<streams::IBuffer> EncodePng(imaging::SoftwareBitmap bitmap, bool thumbnail) {
+    streams::InMemoryRandomAccessStream stream;
+    auto encoder = co_await imaging::BitmapEncoder::CreateAsync(imaging::BitmapEncoder::PngEncoderId(), stream);
+    encoder.SetSoftwareBitmap(bitmap);
+    if (thumbnail) {
+        double scale = 256.0 / (std::max)(bitmap.PixelWidth(), bitmap.PixelHeight());
+        if (scale < 1) {
+            encoder.BitmapTransform().ScaledWidth((std::max)(1u, static_cast<unsigned>(bitmap.PixelWidth() * scale)));
+            encoder.BitmapTransform().ScaledHeight((std::max)(1u, static_cast<unsigned>(bitmap.PixelHeight() * scale)));
+        }
+    }
+    co_await encoder.FlushAsync();
+    streams::DataReader reader(stream.GetInputStreamAt(0));
+    auto size = static_cast<uint32_t>(stream.Size());
+    co_await reader.LoadAsync(size);
+    co_return reader.ReadBuffer(size);
+}
+
 json::JsonArray ReadPhrases() {
     auto path = StorePath();
     if (!std::filesystem::exists(path)) return json::JsonArray();
@@ -103,7 +132,9 @@ json::JsonArray ReadPhrases() {
         throw winrt::hresult_error(E_FAIL, L"常用语文件格式有误，原文件已保留");
     for (auto const& value : phrases) {
         auto phrase = value.GetObject();
-        phrase.GetNamedString(L"id"); phrase.GetNamedString(L"text");
+        phrase.GetNamedString(L"id");
+        if (phrase.GetNamedString(L"type", L"text") == L"image") phrase.GetNamedString(L"preview");
+        else phrase.GetNamedString(L"text");
     }
     return phrases;
 }
@@ -128,33 +159,64 @@ winrt::fire_and_forget HandleMessage(controls::WebView view, winrt::hstring mess
     try {
         auto request = json::JsonObject::Parse(message);
         auto action = request.GetNamedString(L"action");
+        Wh_SetStringValue(L"lastAction", action.c_str());
         Wh_SetIntValue(L"bridgeSeen", 1);
         reply.SetNamedValue(L"action", json::JsonValue::CreateStringValue(action));
         if (action == L"add") {
             auto id = request.GetNamedString(L"id");
+            Wh_SetStringValue(L"requestedItemId", id.c_str());
             auto history = co_await dt::Clipboard::GetHistoryItemsAsync();
             if (g_unloading) co_return;
             if (history.Status() != dt::ClipboardHistoryItemsResultStatus::Success)
                 throw winrt::hresult_error(E_FAIL, L"暂时读不到历史记录，请重新打开面板");
             dt::ClipboardHistoryItem found{nullptr};
-            for (auto const& item : history.Items()) if (item.Id() == id) { found = item; break; }
+            Wh_SetIntValue(L"publicHistoryCount", history.Items().Size());
+            if (history.Items().Size()) Wh_SetStringValue(L"firstPublicItemId", history.Items().GetAt(0).Id().c_str());
+            for (auto const& item : history.Items()) if (!_wcsicmp(item.Id().c_str(), id.c_str())) { found = item; break; }
             if (!found) throw winrt::hresult_error(E_FAIL, L"这条记录已被清理");
-            if (!found.Content().Contains(dt::StandardDataFormats::Text()))
-                throw winrt::hresult_error(E_FAIL, L"常用语暂时只收文字");
-            auto text = co_await found.Content().GetTextAsync();
+            bool image = found.Content().Contains(dt::StandardDataFormats::Bitmap());
+            winrt::hstring text, preview;
+            streams::IBuffer png{nullptr};
+            if (image) {
+                auto reference = co_await found.Content().GetBitmapAsync();
+                auto input = co_await reference.OpenReadAsync();
+                auto decoder = co_await imaging::BitmapDecoder::CreateAsync(input);
+                auto bitmap = co_await decoder.GetSoftwareBitmapAsync(imaging::BitmapPixelFormat::Bgra8, imaging::BitmapAlphaMode::Premultiplied);
+                png = co_await EncodePng(bitmap, false);
+                auto thumbnail = co_await EncodePng(bitmap, true);
+                preview = L"data:image/png;base64," + winrt::Windows::Security::Cryptography::CryptographicBuffer::EncodeToBase64String(thumbnail);
+            } else {
+                if (!found.Content().Contains(dt::StandardDataFormats::Text()))
+                    throw winrt::hresult_error(E_FAIL, L"这条记录没有文字或图片");
+                text = co_await found.Content().GetTextAsync();
+                if (text.empty()) throw winrt::hresult_error(E_FAIL, L"这条文字是空的");
+            }
             if (g_unloading) co_return;
-            if (text.empty()) throw winrt::hresult_error(E_FAIL, L"这条文字是空的");
             // Read after awaiting, so another completed add/remove isn't overwritten.
             auto phrases = ReadPhrases();
             bool duplicate = false;
-            for (auto const& value : phrases)
-                if (value.GetObject().GetNamedString(L"text") == text) { duplicate = true; break; }
+            for (auto const& value : phrases) {
+                auto phrase = value.GetObject();
+                if (image ? phrase.GetNamedString(L"sourceId", L"") == id
+                          : phrase.GetNamedString(L"type", L"text") == L"text" && phrase.GetNamedString(L"text") == text) {
+                    duplicate = true; break;
+                }
+            }
             if (!duplicate) {
                 GUID guid; winrt::check_hresult(CoCreateGuid(&guid));
                 wchar_t key[40]; StringFromGUID2(guid, key, ARRAYSIZE(key));
                 json::JsonObject phrase;
                 phrase.SetNamedValue(L"id", json::JsonValue::CreateStringValue(key));
-                phrase.SetNamedValue(L"text", json::JsonValue::CreateStringValue(text));
+                if (image) {
+                    auto path = ImagePath(key);
+                    std::filesystem::create_directories(path.parent_path());
+                    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+                    output.write(reinterpret_cast<char const*>(png.data()), png.Length()); output.close();
+                    if (!output) throw winrt::hresult_error(E_FAIL, L"图片保存失败");
+                    phrase.SetNamedValue(L"type", json::JsonValue::CreateStringValue(L"image"));
+                    phrase.SetNamedValue(L"sourceId", json::JsonValue::CreateStringValue(id));
+                    phrase.SetNamedValue(L"preview", json::JsonValue::CreateStringValue(preview));
+                } else phrase.SetNamedValue(L"text", json::JsonValue::CreateStringValue(text));
                 phrases.Append(phrase); WritePhrases(phrases);
             }
             reply.SetNamedValue(L"duplicate", json::JsonValue::CreateBooleanValue(duplicate));
@@ -162,9 +224,14 @@ winrt::fire_and_forget HandleMessage(controls::WebView view, winrt::hstring mess
         } else if (action == L"remove") {
             auto phrases = ReadPhrases();
             auto id = request.GetNamedString(L"id");
+            bool image = false;
             for (uint32_t i = 0; i < phrases.Size(); ++i)
-                if (phrases.GetObjectAt(i).GetNamedString(L"id") == id) { phrases.RemoveAt(i); break; }
+                if (phrases.GetObjectAt(i).GetNamedString(L"id") == id) {
+                    image = phrases.GetObjectAt(i).GetNamedString(L"type", L"text") == L"image";
+                    phrases.RemoveAt(i); break;
+                }
             WritePhrases(phrases); reply.SetNamedValue(L"phrases", phrases);
+            if (image) std::filesystem::remove(ImagePath(id));
         } else if (action == L"paste") {
             auto id = request.GetNamedString(L"id");
             auto phrases = ReadPhrases();
@@ -173,7 +240,17 @@ winrt::fire_and_forget HandleMessage(controls::WebView view, winrt::hstring mess
                 auto phrase = value.GetObject();
                 if (phrase.GetNamedString(L"id") != id) continue;
                 dt::DataPackage package;
-                package.SetText(phrase.GetNamedString(L"text"));
+                if (phrase.GetNamedString(L"type", L"text") == L"image") {
+                    std::ifstream input(ImagePath(id), std::ios::binary);
+                    if (!input) throw winrt::hresult_error(E_FAIL, L"找不到保存的图片");
+                    std::string bytes((std::istreambuf_iterator<char>(input)), {});
+                    streams::InMemoryRandomAccessStream stream;
+                    streams::DataWriter writer(stream);
+                    writer.WriteBytes(winrt::array_view<uint8_t const>(reinterpret_cast<uint8_t const*>(bytes.data()), static_cast<uint32_t>(bytes.size())));
+                    co_await writer.StoreAsync(); writer.DetachStream(); stream.Seek(0);
+                    if (g_unloading) co_return;
+                    package.SetBitmap(streams::RandomAccessStreamReference::CreateFromStream(stream));
+                } else package.SetText(phrase.GetNamedString(L"text"));
                 dt::Clipboard::SetContent(package);
                 found = true; break;
             }
@@ -181,11 +258,16 @@ winrt::fire_and_forget HandleMessage(controls::WebView view, winrt::hstring mess
         } else if (action == L"load") {
             reply.SetNamedValue(L"phrases", ReadPhrases());
         } else co_return;
+        Wh_SetStringValue(L"lastOperationError", L"");
+        Wh_SetIntValue(L"lastOperationHresult", 0);
     } catch (winrt::hresult_error const& error) {
         Wh_Log(L"Phrase operation failed: %08X", error.code().value);
+        Wh_SetStringValue(L"lastOperationError", error.message().c_str());
+        Wh_SetIntValue(L"lastOperationHresult", error.code().value);
         reply.SetNamedValue(L"error", json::JsonValue::CreateStringValue(error.message()));
     } catch (...) {
         Wh_Log(L"Phrase storage failed: %08X", winrt::to_hresult());
+        Wh_SetIntValue(L"lastOperationHresult", winrt::to_hresult());
         reply.SetNamedValue(L"error", json::JsonValue::CreateStringValue(L"常用语读写失败，原文件已保留"));
     }
     Reply(view, reply);
@@ -203,6 +285,9 @@ winrt::fire_and_forget PollMessages(controls::WebView view) {
         });
         if (!g_unloading) {
             auto batch = json::JsonObject::Parse(value);
+            static int lastMenuClicks = -1;
+            int clicks = static_cast<int>(batch.GetNamedNumber(L"menuClicks", 0));
+            if (clicks != lastMenuClicks) { Wh_SetIntValue(L"menuClicks", clicks); lastMenuClicks = clicks; }
             if (batch.GetNamedBoolean(L"visible")) g_idleTicks = 0;
             else if (++g_idleTicks >= 10) g_timer.Stop();
             auto requests = batch.GetNamedArray(L"requests");

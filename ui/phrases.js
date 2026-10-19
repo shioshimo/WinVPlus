@@ -2,7 +2,7 @@
   'use strict';
   if (window.__winvPlus) { window.__winvPlus.refresh(); return; }
 
-  var S = { phrases: [], active: false, ready: false, disposed: false, subs: [], outbox: [], error: '' };
+  var S = { phrases: [], active: false, ready: false, disposed: false, subs: [], outbox: [], error: '', menuClicks: 0 };
   window.__winvPlus = S;
   var root, navItem, navHandler, view, list, status, menu, selectedBefore = [];
 
@@ -20,6 +20,7 @@
   S.drain = function () {
     return {
       visible: !root || !ko.isObservable(root.isLastShowHideEventShow) || root.isLastShowHideEventShow(),
+      menuClicks: S.menuClicks,
       requests: S.outbox.splice(0)
     };
   };
@@ -53,29 +54,44 @@
     if (!S.phrases.length) {
       var empty = el('div', 'winvplus-empty');
       empty.appendChild(el('div', 'winvplus-empty-icon', '\uE734'));
-      empty.appendChild(el('p', '', '右键剪贴板文字，添加到这里'));
+      empty.appendChild(el('p', '', '右键剪贴板记录，添加到这里'));
       list.appendChild(empty);
     }
     S.phrases.forEach(function (phrase) {
-      var card = el('div', 'winvplus-card');
-      var paste = el('button', 'winvplus-paste', phrase.text);
-      paste.type = 'button';
-      paste.title = phrase.text;
-      paste.setAttribute('aria-label', '粘贴：' + phrase.text);
+      var card = el('li', 'expanded-view-list-item clipboard-history-items-list-item winvplus-card');
+      var paste = el('div', 'clipboard-history-items-list-item-content winvplus-paste');
+      paste.tabIndex = 0;
+      paste.setAttribute('role', 'button');
+      paste.title = phrase.text || '图片';
+      paste.setAttribute('aria-label', '粘贴：' + (phrase.text || '图片'));
+      if (phrase.type === 'image') {
+        var frame = el('div', 'clipboard-history-items-list-item-imageframe');
+        var image = el('img', 'clipboard-history-items-list-item-image');
+        image.src = phrase.preview; image.alt = '保存的图片';
+        frame.appendChild(image); paste.appendChild(frame);
+      } else paste.appendChild(el('span', 'clipboard-history-items-list-item-text', phrase.text));
       paste.addEventListener('click', function () { send('paste', { id: phrase.id }); });
-      var more = el('button', 'winvplus-more', '\uE712');
-      more.type = 'button';
+      paste.addEventListener('keydown', function (e) {
+        if (e.target === paste && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); paste.click(); }
+      });
+      var actions = el('ul', 'clipboard-history-items-list-item-actions-primary-view');
+      var more = el('li', 'clipboard-history-items-list-item-action winvplus-more');
+      more.tabIndex = 0; more.setAttribute('role', 'button');
+      more.appendChild(el('span', 'clipboard-history-items-list-item-action-icon', '\uE712'));
       more.setAttribute('aria-label', '常用语操作');
       more.title = '操作';
       more.addEventListener('click', function (e) {
         e.stopPropagation();
         showMenu(e, [{ label: '移出常用语', run: function () { send('remove', { id: phrase.id }); } }]);
       });
+      more.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); more.click(); }
+      });
       card.addEventListener('contextmenu', function (e) {
         e.preventDefault(); e.stopPropagation();
         showMenu(e, [{ label: '移出常用语', run: function () { send('remove', { id: phrase.id }); } }]);
       });
-      card.appendChild(paste); card.appendChild(more); list.appendChild(card);
+      actions.appendChild(more); paste.appendChild(actions); card.appendChild(paste); list.appendChild(card);
     });
     tell(S.error || (S.phrases.length ? S.phrases.length + ' 条' : ''));
   }
@@ -85,7 +101,9 @@
     actions.forEach(function (action) {
       var button = el('button', 'winvplus-menu-item', action.label);
       button.type = 'button'; button.setAttribute('role', 'menuitem');
-      button.addEventListener('click', function (e) { e.stopPropagation(); hideMenu(); action.run(); });
+      button.addEventListener('pointerenter', function () { button.classList.add('winvplus-hover'); });
+      button.addEventListener('pointerleave', function () { button.classList.remove('winvplus-hover'); });
+      button.addEventListener('click', function (e) { ++S.menuClicks; e.stopPropagation(); hideMenu(); action.run(); });
       menu.appendChild(button);
     });
     menu.hidden = false;
@@ -95,14 +113,14 @@
     }
     menu.style.left = Math.max(8, Math.min(x, window.innerWidth - menu.offsetWidth - 8)) + 'px';
     menu.style.top = Math.max(8, Math.min(y, window.innerHeight - menu.offsetHeight - 8)) + 'px';
-    menu.firstChild.focus();
+    if (!event.clientX && !event.clientY) menu.firstChild.focus();
   }
   function onContext(e) {
     if (S.active) return;
     var card = e.target.closest && e.target.closest('li.expanded-view-list-item');
-    if (!card || !card.querySelector('.clipboard-history-items-list-item-text')) return;
+    if (!card || !card.querySelector('.clipboard-history-items-list-item-text,.clipboard-history-items-list-item-image')) return;
     var item = ko.dataFor(card);
-    if (!item || !item.id || !item.isClipboardItem && !item.textLabelForTextContent) return;
+    if (!item || !item.id) return;
     e.preventDefault(); e.stopPropagation();
     showMenu(e, [{ label: '添加到常用语', run: function () { send('add', { id: item.id }); } }]);
   }
@@ -154,27 +172,25 @@
     var style = el('style'); style.id = 'winvplus-style';
     style.textContent = [
       '.winvplus-phrases-open #expanded-view-content-lists,.winvplus-phrases-open #expanded-view-scroll-space{display:none!important}',
-      '.winvplus-tab{position:relative;cursor:pointer;font-family:"Segoe Fluent Icons","Segoe MDL2 Assets"}',
-      '.winvplus-tab:focus-visible{outline:2px solid Highlight;outline-offset:-3px;border-radius:4px}',
-      '#winvplus-view{padding:0 12px 12px;box-sizing:border-box;color:inherit}',
+      '#winvplus-view{box-sizing:border-box;color:inherit;overflow-y:auto;height:100%}',
       '#winvplus-view[hidden],#winvplus-menu[hidden]{display:none!important}',
-      '.winvplus-heading{display:flex;align-items:center;justify-content:space-between;min-height:42px;gap:8px}',
-      '.winvplus-heading h2{font:inherit;font-size:14px;margin:0;font-weight:600}',
-      '.winvplus-status{font-size:11px;opacity:.68}',
-      '.winvplus-card{position:relative;display:flex;margin:0 0 8px;border:1px solid rgba(127,127,127,.18);border-radius:8px;background:rgba(255,255,255,.55);box-shadow:0 1px 2px rgba(0,0,0,.06)}',
-      '.winvplus-paste{flex:1;min-width:0;border:0;border-radius:8px;padding:12px 34px 12px 12px;text-align:start;white-space:pre-wrap;word-break:break-word;max-height:132px;overflow:hidden;font:inherit;line-height:1.45;color:inherit;background:transparent;cursor:pointer}',
-      '.winvplus-card:hover{background:rgba(127,127,127,.1)}',
-      '.winvplus-paste:focus-visible,.winvplus-more:focus-visible{outline:2px solid Highlight;outline-offset:-2px}',
-      '.winvplus-more{position:absolute;right:5px;top:6px;width:28px;height:28px;border:0;border-radius:4px;font-family:"Segoe Fluent Icons","Segoe MDL2 Assets";color:inherit;background:transparent;cursor:pointer}',
-      '.winvplus-more:hover{background:rgba(127,127,127,.15)}',
+      '.winvplus-list{list-style:none;padding:0;margin:0 calc(14 * (1 / 16) * 1rem) calc(8 * (1 / 16) * 1rem)}',
+      '.winvplus-status{font-size:calc(12px * var(--expanded-view-scale-ratio) * var(--debug-text-scale-factor));color:var(--foreground-secondary-rest-color)}',
+      '.winvplus-paste{min-width:0;text-align:left;cursor:default}',
+      '.winvplus-paste .clipboard-history-items-list-item-text{min-width:0}',
+      '.winvplus-more .clipboard-history-items-list-item-action-icon{font-family:"Segoe Fluent Icons","Segoe MDL2 Assets"}',
+      '.winvplus-more:focus,.winvplus-paste:focus{outline:none}',
+      '.visible-focus .winvplus-more:focus,.visible-focus .winvplus-paste:focus{outline:2px solid;outline-offset:-2px}',
       '.winvplus-empty{text-align:center;padding:40px 12px;line-height:1.6}',
       '.winvplus-empty-icon{font:26px "Segoe Fluent Icons","Segoe MDL2 Assets";margin-bottom:12px;opacity:.55}',
       '.winvplus-empty p{font-size:12px;opacity:.6;margin:8px 0}',
-      '#winvplus-menu{position:fixed;z-index:2147483647;min-width:150px;padding:4px;border:1px solid rgba(127,127,127,.25);border-radius:8px;background:#fafafa;color:#202020;box-shadow:0 4px 16px rgba(0,0,0,.18)}',
-      '.winvplus-menu-item{display:block;width:100%;border:0;border-radius:4px;padding:9px 12px;text-align:start;background:transparent;color:inherit;font:inherit;font-size:12px;cursor:pointer}',
-      '.winvplus-menu-item:hover,.winvplus-menu-item:focus{background:rgba(127,127,127,.15);outline:none}',
-      '@media(prefers-color-scheme:dark){.winvplus-card{background:rgba(255,255,255,.05)}#winvplus-menu{background:#292929;color:#fff}}',
-      '@media(forced-colors:active){.winvplus-card,#winvplus-menu{background:Canvas;color:CanvasText;border:1px solid CanvasText}.winvplus-paste,.winvplus-more{color:ButtonText}}'
+      '#winvplus-menu{position:fixed;z-index:2147483647;min-width:150px;padding:4px;border:1px solid var(--flyout-action-menu-border-color);border-radius:8px;background:var(--tooltip-background-color);color:var(--foreground-primary-rest-color);box-shadow:0 4px 16px rgba(0,0,0,.18)}',
+      '.winvplus-menu-item{display:block;box-sizing:border-box;width:100%;border:0;border-radius:4px;padding:9px 12px;text-align:left;background:transparent;color:inherit;font-family:inherit;font-size:calc(14px * var(--expanded-view-scale-ratio) * var(--debug-text-scale-factor));line-height:calc(20px * var(--expanded-view-scale-ratio) * var(--debug-text-scale-factor));cursor:default}',
+      '.winvplus-menu-item:hover,.winvplus-menu-item.winvplus-hover{background-color:var(--transparent-button-hover)}',
+      '.winvplus-menu-item:active{background-color:var(--transparent-button-pressed)}',
+      '.winvplus-menu-item:focus{outline:none}',
+      '.visible-focus .winvplus-menu-item:focus{outline:2px solid;outline-offset:-2px}',
+      '@media screen and (-ms-high-contrast:active){#winvplus-menu{background:Window;color:WindowText;border:1px solid WindowText}.winvplus-menu-item:hover{background:Highlight;color:HighlightText}}'
     ].join('\n');
     document.head.appendChild(style);
 
@@ -203,9 +219,11 @@
 
     view = el('section'); view.id = 'winvplus-view'; view.hidden = true;
     view.setAttribute('role', 'tabpanel'); view.setAttribute('aria-label', '常用语');
-    var heading = el('div', 'winvplus-heading'); heading.appendChild(el('h2', '', '常用语'));
-    status = el('span', 'winvplus-status'); heading.appendChild(status);
-    list = el('div', 'winvplus-list'); view.appendChild(heading); view.appendChild(list); content.appendChild(view);
+    var heading = el('div', 'category-header');
+    var headerContent = el('div', 'category-header-container');
+    headerContent.appendChild(el('span', 'category-header-text', '常用语'));
+    status = el('span', 'winvplus-status'); headerContent.appendChild(status); heading.appendChild(headerContent);
+    list = el('ul', 'clipboard-history-items-list winvplus-list'); view.appendChild(heading); view.appendChild(list); content.appendChild(view);
     menu = el('div'); menu.id = 'winvplus-menu'; menu.hidden = true; menu.setAttribute('role', 'menu'); document.body.appendChild(menu);
     nav.addEventListener('click', onNav, true);
     document.addEventListener('contextmenu', onContext, true);
