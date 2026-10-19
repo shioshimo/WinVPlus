@@ -2,7 +2,8 @@
 
 对WIN原生的剪切板的改进 并且尽量保持了一致的设计语言 历史上限从 25 条改成 300 条且增加了剪切板功能
 
-<img src="docs/preview.png" alt="Windows 原生剪贴板，顶部剪贴板图标右边新增常用语星标" width="420"><img width="922" height="746" alt="{85F7C746-EDE6-45C6-A972-63A52711DEFC}" src="https://github.com/user-attachments/assets/d2af79b0-4b38-4fc3-a8e0-b78dfbd45e01" />
+<img src="docs/preview.png" alt="Windows 原生剪贴板，顶部剪贴板图标右边新增常用语星标" width="420"><img width="305" height="322" alt="{0B73350C-14B8-4309-93D2-CD95C1DF657E}" src="https://github.com/user-attachments/assets/339c91f4-4b80-4ebe-96b3-3674f3754910" />
+
 
 
 
