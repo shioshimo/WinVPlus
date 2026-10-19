@@ -128,6 +128,13 @@ function createFixture() {
     getAriaLabel() { return this.accessibilityLabel; }
   }
 
+  class NativeAction {
+    constructor(options = {}, asyncHandler = () => Promise.resolve()) {
+      Object.assign(this, options);
+      this.asyncHandler = asyncHandler;
+    }
+  }
+
   const ko = {
     observable: makeObservable,
     observableArray: makeObservableArray,
@@ -217,39 +224,82 @@ function createFixture() {
   }, { filename: 'phrases.js' });
   inject();
 
-  function addTextHistoryItem(id, text) {
+  function addHistoryItem(id, type, value) {
+    const item = {
+      id,
+      type,
+      text: type === 'text' ? value : undefined,
+      preview: type === 'image' ? value : undefined,
+      moreCalls: 0,
+      hideSecondaryCalls: [],
+      hideSecondaryViewAsync(options) {
+        this.hideSecondaryCalls.push(options);
+        return Promise.resolve();
+      },
+    };
+    item.primaryMore = new NativeAction(
+      { id: 'primary-more', position: 10, label: '更多' },
+      () => { item.moreCalls++; return Promise.resolve(); },
+    );
+    item.secondaryDelete = new NativeAction(
+      { id: 'secondary-delete', position: 20, label: '删除' },
+    );
+    item.actions = makeObservableArray([item.primaryMore, item.secondaryDelete]);
+
     const card = document.createElement('li');
-    card.className = 'expanded-view-list-item';
+    card.className = 'expanded-view-list-item clipboard-history-items-list-item';
     card.setAttribute('role', 'row');
     const content = document.createElement('div');
     content.className = 'clipboard-history-items-list-item-content';
     content.setAttribute('role', 'cell');
-    const label = document.createElement('span');
-    label.className = 'clipboard-history-items-list-item-text';
-    label.textContent = text;
-    content.appendChild(label);
+
+    let label;
+    let image;
+    if (type === 'text') {
+      label = document.createElement('span');
+      label.className = 'clipboard-history-items-list-item-text';
+      label.textContent = value;
+      content.appendChild(label);
+    } else {
+      card.classList.add('expanded-view-list-item-media');
+      const frame = document.createElement('div');
+      frame.className = 'clipboard-history-items-list-item-imageframe';
+      image = document.createElement('img');
+      image.className = 'clipboard-history-items-list-item-image';
+      image.src = value;
+      frame.appendChild(image);
+      content.appendChild(frame);
+    }
+
+    const primaryActions = document.createElement('ul');
+    primaryActions.className = 'clipboard-history-items-list-item-actions-primary-view';
+    const more = document.createElement('li');
+    more.className = 'clipboard-history-items-list-item-action primary-more';
+    more.setAttribute('data-native-action-id', item.primaryMore.id);
+    more.addEventListener('click', () => item.primaryMore.asyncHandler());
+    primaryActions.appendChild(more);
+
+    const secondaryActions = document.createElement('ul');
+    secondaryActions.className = 'clipboard-history-items-list-item-actions-secondary-view';
+    const secondaryDelete = document.createElement('li');
+    secondaryDelete.className = 'clipboard-history-items-list-item-action secondary-delete';
+    secondaryDelete.setAttribute('data-native-action-id', item.secondaryDelete.id);
+    secondaryActions.appendChild(secondaryDelete);
+
     card.appendChild(content);
+    card.appendChild(primaryActions);
+    card.appendChild(secondaryActions);
     document.getElementById('expanded-view-content-lists').appendChild(card);
-    dataByElement.set(card, { id, isClipboardItem: true, label: text });
-    return { card, label };
+    dataByElement.set(card, item);
+    return { card, label, image, item, more, secondaryDelete };
+  }
+
+  function addTextHistoryItem(id, text) {
+    return addHistoryItem(id, 'text', text);
   }
 
   function addImageHistoryItem(id) {
-    const card = document.createElement('li');
-    card.className = 'expanded-view-list-item expanded-view-list-item-media';
-    card.setAttribute('role', 'row');
-    const content = document.createElement('div');
-    content.className = 'clipboard-history-items-list-item-content';
-    const frame = document.createElement('div');
-    frame.className = 'clipboard-history-items-list-item-imageframe';
-    const image = document.createElement('img');
-    image.className = 'clipboard-history-items-list-item-image';
-    frame.appendChild(image);
-    content.appendChild(frame);
-    card.appendChild(content);
-    document.getElementById('expanded-view-content-lists').appendChild(card);
-    dataByElement.set(card, { id, isClipboardItem: true });
-    return { card, image };
+    return addHistoryItem(id, 'image', `data:image/png;base64,${id}`);
   }
 
   return {
@@ -264,9 +314,9 @@ function createFixture() {
   };
 }
 
-function dispatchContextMenu(window, target) {
+function dispatchContextMenu(window, target, button = 2) {
   const event = new window.MouseEvent('contextmenu', {
-    bubbles: true, cancelable: true, clientX: 30, clientY: 40,
+    bubbles: true, cancelable: true, button, clientX: 30, clientY: 40,
   });
   target.dispatchEvent(event);
   return event;
@@ -276,7 +326,11 @@ function drainRequests(window) {
   return JSON.parse(JSON.stringify(window.__winvPlus.drain().requests));
 }
 
-test('adds one native tab, adds text and image records by id, and renders image previews', (t) => {
+function waitForMutationObserver(window) {
+  return new Promise((resolve) => window.queueMicrotask(resolve));
+}
+
+test('extends native history actions and saves text and image items through their handlers', async (t) => {
   const fixture = createFixture();
   t.after(() => fixture.dom.window.close());
   const { window, document, navModel, root } = fixture;
@@ -297,42 +351,43 @@ test('adds one native tab, adds text and image records by id, and renders image 
   assert.equal(document.querySelectorAll('#winvplus-style').length, 1);
   assert.equal(root.customNavigationMenuClickHandlers.length, 1);
 
-
   drainRequests(window);
   const textItem = fixture.addTextHistoryItem('clipboard-text-42', 'hello');
-  const textEvent = dispatchContextMenu(window, textItem.label);
-  assert.equal(textEvent.defaultPrevented, true);
-  const addAction = document.querySelector('#winvplus-menu [role="menuitem"]');
-  assert.ok(addAction);
-  assert.equal(addAction.textContent, '添加到常用语');
-  addAction.click();
-  assert.deepEqual(drainRequests(window), [
-    { action: 'add', id: 'clipboard-text-42' },
+  await waitForMutationObserver(window);
+  assert.deepEqual(textItem.item.actions().map((action) => action.id), [
+    'primary-more', 'secondary-delete', 'winvplus-save',
   ]);
+  const textSave = textItem.item.actions().find((action) => action.id === 'winvplus-save');
+  assert.equal(textSave.position, textItem.item.secondaryDelete.position);
+  assert.equal(textSave.accessibilityText(), '添加到常用语');
+  assert.equal(textSave.textLabel, undefined);
+  assert.equal(textSave.getTooltipText(), undefined);
+  await textSave.asyncHandler();
+  assert.deepEqual(drainRequests(window), [{ action: 'add', id: 'clipboard-text-42' }]);
+  assert.deepEqual(textItem.item.hideSecondaryCalls.map((options) => options.withAnimation), [false]);
+
+  let nativeContextMenuCalls = 0;
+  document.body.addEventListener('contextmenu', () => { nativeContextMenuCalls++; });
+  const textEvent = dispatchContextMenu(window, textItem.label, 2);
+  assert.equal(textEvent.defaultPrevented, true);
+  assert.equal(nativeContextMenuCalls, 0);
+  assert.equal(textItem.item.moreCalls, 1);
+  assert.deepEqual(drainRequests(window), []);
 
   const imageItem = fixture.addImageHistoryItem('clipboard-image-7');
-  const imageEvent = dispatchContextMenu(window, imageItem.image);
-  assert.equal(imageEvent.defaultPrevented, true);
-  const imageAddAction = document.querySelector('#winvplus-menu [role="menuitem"]');
-  assert.ok(imageAddAction);
-  assert.equal(imageAddAction.textContent, '添加到常用语');
-  imageAddAction.click();
-  assert.deepEqual(drainRequests(window), [
-    { action: 'add', id: 'clipboard-image-7' },
+  await waitForMutationObserver(window);
+  assert.deepEqual(imageItem.item.actions().map((action) => action.id), [
+    'primary-more', 'secondary-delete', 'winvplus-save',
   ]);
-
-  const preview = 'data:image/png;base64,aGVsbG8=';
-  window.__winvPlus.receive({ phrases: [{ id: 'clipboard-image-7', type: 'image', preview }] });
-  const imagePhrase = document.querySelector('.winvplus-card .winvplus-paste');
-  const previewImage = imagePhrase.querySelector('img.clipboard-history-items-list-item-image');
-  assert.ok(previewImage);
-  assert.equal(previewImage.src, preview);
-  assert.equal(previewImage.alt, '保存的图片');
-  assert.equal(imagePhrase.getAttribute('role'), 'button');
-  assert.equal(imagePhrase.querySelector('.clipboard-history-items-list-item-text'), null);
+  assert.ok(imageItem.item.preview.startsWith('data:image/png;base64,'));
+  const imageSave = imageItem.item.actions().find((action) => action.id === 'winvplus-save');
+  await imageSave.asyncHandler();
+  assert.deepEqual(drainRequests(window), [{ action: 'add', id: 'clipboard-image-7' }]);
+  assert.deepEqual(imageItem.item.hideSecondaryCalls.map((options) => options.withAnimation), [false]);
+  assert.equal(textItem.item.actions().filter((action) => action.id === 'winvplus-save').length, 1);
 });
 
-test('renders text safely, supports keyboard paste, keeps remove separate, and uses legacy menu hover selectors', async (t) => {
+test('renders favorites safely, supports keyboard paste, removes without pasting, and orders newest first', async (t) => {
   const fixture = createFixture();
   t.after(() => fixture.dom.window.close());
   const { window, document } = fixture;
@@ -340,83 +395,141 @@ test('renders text safely, supports keyboard paste, keeps remove separate, and u
   drainRequests(window);
 
   const phraseText = '<img src=x onerror="window.injected=true">\n' + '长文字'.repeat(3000);
-  window.__winvPlus.receive({ phrases: [{ id: 'phrase-1', text: phraseText }] });
-  const pasteControl = document.querySelector('.winvplus-card .winvplus-paste');
+  window.__winvPlus.receive({ phrases: [
+    { id: 'phrase-old', text: 'old phrase' },
+    { id: 'phrase-1', text: phraseText },
+    { id: 'phrase-image', type: 'image', preview: 'data:image/png;base64,aGVsbG8=' },
+  ] });
+  const cards = [...document.querySelectorAll('.winvplus-card')];
+  assert.equal(cards.length, 3);
+  const previewImage = cards[0].querySelector('img.clipboard-history-items-list-item-image');
+  assert.ok(previewImage);
+  assert.equal(previewImage.src, 'data:image/png;base64,aGVsbG8=');
+  assert.equal(previewImage.alt, '保存的图片');
+  assert.equal(cards[1].querySelector('.clipboard-history-items-list-item-text').textContent, phraseText);
+  assert.equal(cards[2].querySelector('.clipboard-history-items-list-item-text').textContent, 'old phrase');
+
+  const card = cards[1];
+  const pasteControl = card.querySelector('.winvplus-paste');
   assert.ok(pasteControl);
   assert.equal(pasteControl.tagName, 'DIV');
   assert.equal(pasteControl.getAttribute('role'), 'button');
   const textSpan = pasteControl.querySelector('span.clipboard-history-items-list-item-text');
   assert.ok(textSpan);
   assert.equal(textSpan.textContent, phraseText);
-  assert.equal(pasteControl.title, phraseText);
+  assert.equal(pasteControl.hasAttribute('title'), false);
   assert.equal(pasteControl.querySelector('img'), null);
+  assert.equal(card.querySelector('.winvplus-more'), null);
+  assert.equal(card.querySelector('.winvplus-secondary'), null);
+  assert.equal(document.getElementById('winvplus-menu'), null);
   assert.equal(document.querySelector('body > img'), null);
   assert.equal(window.injected, undefined);
 
   pasteControl.click();
-  assert.deepEqual(drainRequests(window), [
-    { action: 'paste', id: 'phrase-1' },
-  ]);
+  assert.deepEqual(drainRequests(window), [{ action: 'paste', id: 'phrase-1' }]);
 
   for (const key of ['Enter', ' ']) {
     const event = new window.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
     pasteControl.dispatchEvent(event);
     assert.equal(event.defaultPrevented, true);
-    assert.deepEqual(drainRequests(window), [
-      { action: 'paste', id: 'phrase-1' },
-    ]);
+    assert.deepEqual(drainRequests(window), [{ action: 'paste', id: 'phrase-1' }]);
   }
 
   window.__winvPlus.receive({ action: 'paste' });
   await Promise.resolve();
   assert.equal(fixture.pasteCalls, 1);
 
-  document.querySelector('.winvplus-card .winvplus-more').click();
-  const removeAction = document.querySelector('#winvplus-menu [role="menuitem"]');
-  assert.ok(removeAction);
-  assert.equal(removeAction.textContent, '移出常用语');
-  const style = document.getElementById('winvplus-style').textContent;
-  assert.match(style, /\.winvplus-menu-item:hover,\.winvplus-menu-item\.winvplus-hover/);
-  assert.equal(style.includes(':focus-visible'), false);
-  removeAction.dispatchEvent(new window.Event('pointerenter'));
-  assert.equal(removeAction.classList.contains('winvplus-hover'), true);
-  removeAction.dispatchEvent(new window.Event('pointerleave'));
-  assert.equal(removeAction.classList.contains('winvplus-hover'), false);
-  removeAction.click();
-  assert.deepEqual(drainRequests(window), [
-    { action: 'remove', id: 'phrase-1' },
-  ]);
+  const remove = card.querySelector('.winvplus-remove');
+  assert.ok(remove);
+  assert.equal(remove.hasAttribute('title'), false);
+  assert.equal(remove.getAttribute('role'), 'button');
+  remove.querySelector('.winvplus-action-icon').click();
+  assert.deepEqual(drainRequests(window), [{ action: 'remove', id: 'phrase-1' }]);
+  assert.equal(fixture.pasteCalls, 1);
+
+  for (const key of ['Enter', ' ']) {
+    const event = new window.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+    remove.dispatchEvent(event);
+    assert.equal(event.defaultPrevented, true);
+    assert.deepEqual(drainRequests(window), [{ action: 'remove', id: 'phrase-1' }]);
+    assert.equal(fixture.pasteCalls, 1);
+  }
 });
 
-test('dispose removes UI and event handlers, then the script can install again', (t) => {
+test('hiding restores native history and right-clicking a favorite has no side effect', (t) => {
+  const fixture = createFixture();
+  t.after(() => fixture.dom.window.close());
+  const { window, document, root, clipboard } = fixture;
+  const nativeList = document.getElementById('expanded-view-content-lists');
+  fixture.activate();
+  drainRequests(window);
+  window.__winvPlus.receive({ phrases: [{ id: 'phrase-context-1', text: 'saved phrase' }] });
+
+  const card = document.querySelector('.winvplus-card');
+  assert.equal(card.querySelector('.winvplus-more'), null);
+  assert.equal(card.querySelector('.winvplus-secondary'), null);
+  assert.equal(document.getElementById('winvplus-menu'), null);
+  const contextEvent = dispatchContextMenu(window, card, 2);
+  assert.equal(contextEvent.defaultPrevented, true);
+  assert.deepEqual(drainRequests(window), []);
+  assert.equal(fixture.pasteCalls, 0);
+
+  assert.equal(document.body.classList.contains('winvplus-phrases-open'), true);
+  assert.equal(window.getComputedStyle(nativeList).display, 'none');
+
+  root.isLastShowHideEventShow(false);
+  assert.equal(window.__winvPlus.active, false);
+  assert.equal(document.body.classList.contains('winvplus-phrases-open'), false);
+  assert.equal(document.getElementById('winvplus-view').hidden, true);
+  assert.notEqual(window.getComputedStyle(nativeList).display, 'none');
+  assert.equal(clipboard.isSelected(), true);
+
+  root.isLastShowHideEventShow(true);
+  fixture.activate();
+  assert.equal(window.__winvPlus.active, true);
+  assert.equal(clipboard.isSelected(), false);
+  assert.deepEqual(drainRequests(window), [{ action: 'load' }]);
+  assert.deepEqual(drainRequests(window), []);
+});
+
+test('dispose removes native actions and observer, then reinstall adds each action once', async (t) => {
   const fixture = createFixture();
   t.after(() => fixture.dom.window.close());
   const { window, document, nav, root } = fixture;
   fixture.activate();
+  drainRequests(window);
+
+  const firstItem = fixture.addTextHistoryItem('clipboard-before-dispose', 'before dispose');
+  await waitForMutationObserver(window);
+  assert.equal(firstItem.item.actions().filter((action) => action.id === 'winvplus-save').length, 1);
 
   assert.ok(document.getElementById('winvplus-view'));
-  assert.ok(document.getElementById('winvplus-menu'));
-  assert.equal(document.getElementById('winvplus-toast'), null);
+  assert.equal(document.getElementById('winvplus-menu'), null);
   assert.ok(document.getElementById('winvplus-style'));
   assert.equal(root.customNavigationMenuClickHandlers.length, 1);
   assert.equal(fixture.navigationListeners.count('click'), 1);
-  assert.equal(fixture.documentListeners.total(), 3);
+  assert.equal(fixture.documentListeners.total(), 1);
+  assert.equal(fixture.documentListeners.count('contextmenu'), 1);
+  assert.equal(fixture.documentListeners.count('pointerdown'), 0);
+  assert.equal(fixture.documentListeners.count('keydown'), 0);
 
   const oldState = window.__winvPlus;
   oldState.dispose();
   assert.equal(window.__winvPlus, undefined);
   assert.equal(document.getElementById('winvplus-view'), null);
-  assert.equal(document.getElementById('winvplus-menu'), null);
-  assert.equal(document.getElementById('winvplus-toast'), null);
   assert.equal(document.getElementById('winvplus-style'), null);
-  assert.equal(document.getElementById('navigation-menu-item-container-winvplus-phrases'), null);
   assert.equal(root.customNavigationMenuClickHandlers.length, 0);
   assert.equal(fixture.navigationListeners.count('click'), 0);
   assert.equal(fixture.documentListeners.total(), 0);
+  assert.equal(fixture.documentListeners.count('contextmenu'), 0);
+  assert.equal(firstItem.item.actions().some((action) => action.id === 'winvplus-save'), false);
 
-  const item = fixture.addTextHistoryItem('clipboard-after-dispose', 'after dispose');
-  const eventAfterDispose = dispatchContextMenu(window, item.label);
+  const afterDispose = fixture.addImageHistoryItem('clipboard-after-dispose');
+  await waitForMutationObserver(window);
+  assert.equal(afterDispose.item.actions().some((action) => action.id === 'winvplus-save'), false);
+  const eventAfterDispose = dispatchContextMenu(window, afterDispose.image, 2);
   assert.equal(eventAfterDispose.defaultPrevented, false);
+  assert.equal(afterDispose.item.moreCalls, 0);
 
   fixture.inject();
   assert.notEqual(window.__winvPlus, oldState);
@@ -424,6 +537,14 @@ test('dispose removes UI and event handlers, then the script can install again',
   assert.equal(document.querySelectorAll('#navigation-menu-item-container-winvplus-phrases').length, 1);
   assert.equal(root.customNavigationMenuClickHandlers.length, 1);
   assert.equal(fixture.navigationListeners.count('click'), 1);
-  assert.equal(fixture.documentListeners.total(), 3);
+  assert.equal(fixture.documentListeners.total(), 1);
+  assert.equal(fixture.documentListeners.count('contextmenu'), 1);
+  assert.equal(fixture.documentListeners.count('pointerdown'), 0);
+  assert.equal(fixture.documentListeners.count('keydown'), 0);
   assert.ok(nav.contains(document.getElementById('navigation-menu-item-container-winvplus-phrases')));
+  assert.equal(firstItem.item.actions().filter((action) => action.id === 'winvplus-save').length, 1);
+  assert.equal(afterDispose.item.actions().filter((action) => action.id === 'winvplus-save').length, 1);
+  await waitForMutationObserver(window);
+  assert.equal(firstItem.item.actions().filter((action) => action.id === 'winvplus-save').length, 1);
+  assert.equal(afterDispose.item.actions().filter((action) => action.id === 'winvplus-save').length, 1);
 });

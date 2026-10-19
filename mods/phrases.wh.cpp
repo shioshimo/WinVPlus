@@ -285,6 +285,13 @@ winrt::fire_and_forget PollMessages(controls::WebView view) {
         });
         if (!g_unloading) {
             auto batch = json::JsonObject::Parse(value);
+            static winrt::hstring lastUiState;
+            auto uiState = batch.GetNamedString(L"uiState", L"");
+            if (uiState != lastUiState) {
+                Wh_SetStringValue(L"lastUiState", uiState.c_str());
+                if (batch.GetNamedBoolean(L"visible")) Wh_SetStringValue(L"lastVisibleUiState", uiState.c_str());
+                lastUiState = uiState;
+            }
             static int lastMenuClicks = -1;
             int clicks = static_cast<int>(batch.GetNamedNumber(L"menuClicks", 0));
             if (clicks != lastMenuClicks) { Wh_SetIntValue(L"menuClicks", clicks); lastMenuClicks = clicks; }
