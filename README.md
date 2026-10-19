@@ -101,4 +101,10 @@ npm test
 
 模拟测试不代替真实 Win+V 验收。发布前还需要实际测试：打开面板、右键添加、长文字保存、点击粘贴、关闭重开、清空普通历史后常用语仍在。
 
+## 参与者
+
+[無理](https://github.com/shioshimo) × [Codex](https://github.com/codex)
+
+無理负责想法、交互设计和实机验收，Codex 协作完成代码、调试和测试。
+
 代码使用 MIT 许可。接入方式参考的项目见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
