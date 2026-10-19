@@ -1,6 +1,6 @@
 # WinVPlus
 
-在 Windows 自带的 Win+V 里多留一点东西。
+对WIN原生的剪切板的改进 并且尽量保持了一致的设计语言 历史上限从 25 条改成 300 条且增加了剪切板功能
 
 <img src="docs/preview.png" alt="Windows 原生剪贴板，顶部剪贴板图标右边新增常用语星标" width="420"><img width="311" height="357" alt="{C91D7C92-7A6C-45DA-BD0E-E245CE518E92}" src="https://github.com/user-attachments/assets/df4d3075-2b33-41a6-9415-fbd6176ed30b" />
 
@@ -9,7 +9,6 @@
 - 顶部剪贴板右边多一个星标，用来放常用语。
 - 右键文字或图片记录，在原生操作区点星标。也可以点记录原来的三个点。
 - 在常用语里点内容就粘贴，点右侧的垃圾桶就移出。
-- 最新收藏排在最上面。
 
 **目前是实验版。** 针对 Windows 11 x64 开发。确认过的开发环境是 25H2 / 26200.6725；不一定是所有 Windows 版本通用的补丁（
 
@@ -100,11 +99,5 @@ npm test
 ```
 
 模拟测试不代替真实 Win+V 验收。发布前还需要实际测试：打开面板、右键添加、长文字保存、点击粘贴、关闭重开、清空普通历史后常用语仍在。
-
-## 参与者
-
-[無理](https://github.com/shioshimo) × [Codex](https://github.com/codex)
-
-無理负责想法、交互设计和实机验收，Codex 协作完成代码、调试和测试。
 
 代码使用 MIT 许可。接入方式参考的项目见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
