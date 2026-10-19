@@ -2,7 +2,8 @@
 
 在 Windows 自带的 Win+V 里多留一点东西。
 
-<img src="docs/preview.png" alt="Windows 原生剪贴板，顶部剪贴板图标右边新增常用语星标" width="420"><img width="287" height="313" alt="{167164F3-C963-4B46-89B6-7C4D2F609ACD}" src="https://github.com/user-attachments/assets/3c5bff98-b299-427a-8a34-1c2a985c6fd0" />
+<img src="docs/preview.png" alt="Windows 原生剪贴板，顶部剪贴板图标右边新增常用语星标" width="420"><img width="311" height="357" alt="{C91D7C92-7A6C-45DA-BD0E-E245CE518E92}" src="https://github.com/user-attachments/assets/df4d3075-2b33-41a6-9415-fbd6176ed30b" />
+
 
 - 历史上限从 25 条改成 300 条。
 - 顶部剪贴板右边多一个星标，用来放常用语。
