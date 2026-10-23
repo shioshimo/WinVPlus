@@ -5,7 +5,7 @@
 // @id              winvplus-history-limit
 // @name            WinVPlus Clipboard History Limit
 // @description     Adjusts the Windows clipboard history item and memory limits.
-// @version         0.1.0
+// @version         0.2.0
 // @author          WinVPlus contributors
 // @include         svchost.exe
 // @architecture    x86-64

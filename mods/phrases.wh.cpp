@@ -2,7 +2,7 @@
 // @id              winvplus-phrases
 // @name            WinVPlus - 常用语
 // @description     Add a saved phrases tab to the native Windows 11 clipboard panel.
-// @version         0.1.0
+// @version         0.2.0
 // @author          WinVPlus contributors
 // @license         MIT
 // @include         TextInputHost.exe
@@ -121,9 +121,36 @@ wf::IAsyncOperation<streams::IBuffer> EncodePng(imaging::SoftwareBitmap bitmap, 
     co_return reader.ReadBuffer(size);
 }
 
+// UI-thread cache: only parse the index when its on-disk identity changes.
+// Callers that mutate the array must use CopyPhrases so a failed save cannot
+// corrupt the last successfully loaded snapshot.
+json::JsonArray g_cachedPhrases{nullptr};
+std::filesystem::file_time_type g_cachedTime{};
+uintmax_t g_cachedSize = 0;
+bool g_cachedExists = false;
+
+json::JsonArray CopyPhrases(json::JsonArray const& source) {
+    json::JsonArray copy;
+    for (auto const& value : source) copy.Append(value);
+    return copy;
+}
+
+winrt::hstring StoreRevision() {
+    if (!g_cachedExists) return L"missing";
+    auto ticks = std::chrono::duration_cast<std::chrono::microseconds>(g_cachedTime.time_since_epoch()).count();
+    return winrt::to_hstring(static_cast<int64_t>(ticks)) + L":" + winrt::to_hstring(static_cast<uint64_t>(g_cachedSize));
+}
+
 json::JsonArray ReadPhrases() {
     auto path = StorePath();
-    if (!std::filesystem::exists(path)) return json::JsonArray();
+    if (!std::filesystem::exists(path)) {
+        g_cachedPhrases = json::JsonArray(); g_cachedExists = false;
+        return g_cachedPhrases;
+    }
+    auto stamp = std::filesystem::last_write_time(path);
+    auto size = std::filesystem::file_size(path);
+    if (g_cachedPhrases && g_cachedExists && stamp == g_cachedTime && size == g_cachedSize)
+        return g_cachedPhrases;
     std::ifstream stream(path, std::ios::binary);
     if (!stream) throw winrt::hresult_error(E_FAIL, L"常用语文件读取失败");
     std::string data((std::istreambuf_iterator<char>(stream)), {});
@@ -136,7 +163,10 @@ json::JsonArray ReadPhrases() {
         if (phrase.GetNamedString(L"type", L"text") == L"image") phrase.GetNamedString(L"preview");
         else phrase.GetNamedString(L"text");
     }
-    return phrases;
+    if (std::filesystem::last_write_time(path) != stamp || std::filesystem::file_size(path) != size)
+        throw winrt::hresult_error(E_FAIL, L"常用语文件正在更新，请重试");
+    g_cachedPhrases = phrases; g_cachedTime = stamp; g_cachedSize = size; g_cachedExists = true;
+    return g_cachedPhrases;
 }
 
 void WritePhrases(json::JsonArray const& phrases) {
@@ -148,6 +178,11 @@ void WritePhrases(json::JsonArray const& phrases) {
     stream.write(text.data(), text.size()); stream.close();
     if (!stream || !MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
         throw winrt::hresult_error(E_FAIL, L"常用语保存失败，原文件已保留");
+    // Invalidate first: an error while reading metadata must not leave a stale cache.
+    g_cachedPhrases = nullptr;
+    g_cachedTime = std::filesystem::last_write_time(path);
+    g_cachedSize = std::filesystem::file_size(path);
+    g_cachedPhrases = phrases; g_cachedExists = true;
 }
 
 // A request can await Windows' history API without blocking the panel.
@@ -193,7 +228,7 @@ winrt::fire_and_forget HandleMessage(controls::WebView view, winrt::hstring mess
             }
             if (g_unloading) co_return;
             // Read after awaiting, so another completed add/remove isn't overwritten.
-            auto phrases = ReadPhrases();
+            auto phrases = CopyPhrases(ReadPhrases());
             bool duplicate = false;
             for (auto const& value : phrases) {
                 auto phrase = value.GetObject();
@@ -221,8 +256,9 @@ winrt::fire_and_forget HandleMessage(controls::WebView view, winrt::hstring mess
             }
             reply.SetNamedValue(L"duplicate", json::JsonValue::CreateBooleanValue(duplicate));
             reply.SetNamedValue(L"phrases", phrases);
+            reply.SetNamedValue(L"revision", json::JsonValue::CreateStringValue(StoreRevision()));
         } else if (action == L"remove") {
-            auto phrases = ReadPhrases();
+            auto phrases = CopyPhrases(ReadPhrases());
             auto id = request.GetNamedString(L"id");
             bool image = false;
             for (uint32_t i = 0; i < phrases.Size(); ++i)
@@ -231,6 +267,7 @@ winrt::fire_and_forget HandleMessage(controls::WebView view, winrt::hstring mess
                     phrases.RemoveAt(i); break;
                 }
             WritePhrases(phrases); reply.SetNamedValue(L"phrases", phrases);
+            reply.SetNamedValue(L"revision", json::JsonValue::CreateStringValue(StoreRevision()));
             if (image) std::filesystem::remove(ImagePath(id));
         } else if (action == L"paste") {
             auto id = request.GetNamedString(L"id");
@@ -256,7 +293,11 @@ winrt::fire_and_forget HandleMessage(controls::WebView view, winrt::hstring mess
             }
             if (!found) throw winrt::hresult_error(E_FAIL, L"这条常用语已被移除");
         } else if (action == L"load") {
-            reply.SetNamedValue(L"phrases", ReadPhrases());
+            auto phrases = ReadPhrases();
+            auto revision = StoreRevision();
+            reply.SetNamedValue(L"revision", json::JsonValue::CreateStringValue(revision));
+            if (request.GetNamedString(L"revision", L"") != revision)
+                reply.SetNamedValue(L"phrases", phrases);
         } else co_return;
         Wh_SetStringValue(L"lastOperationError", L"");
         Wh_SetIntValue(L"lastOperationHresult", 0);

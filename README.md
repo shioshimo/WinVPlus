@@ -15,6 +15,16 @@
 
 **目前是实验版。** 针对 Windows 11 x64 开发。确认过的开发环境是 25H2 / 26200.6725；不一定是所有 Windows 版本通用的补丁（
 
+### 0.2.0 修了什么
+
+- 加了可选的登录自启。便携版以前只复制 mod，Windhawk 没运行就不会有星标和扩容。现在可以注册当前用户的计划任务，登录 15 秒后在托盘启动；不会保存密码。
+- 收藏索引按文件时间和大小缓存。文件没变就复用，打开同一页只核对版本，不反复传整份文字和缩略图。文件被外部修改时会重新读取；损坏文件会报错并保留。
+- 收藏先显示最近 24 条，继续往下滚或点「继续显示」再加载。重新打开保留已有卡片和图片。
+- 原生历史新增卡片时只处理变化的节点，不再因为操作按钮变化就重扫整页。
+- 更新安装时备份旧配置和源码，并保留用户自己调的容量、启用状态和收藏。
+
+这些改动减少的是本扩展增加的读取和渲染成本。Windows 原生历史仍由系统读取，未替换成自制历史数据库，也没有自动备份普通历史。重启后普通历史的清理规则不变。
+
 当前开发机上已确认原生标签、文字添加和保存、图片收藏和粘贴、移出时的原生过渡，以及关闭重开面板。系统接口已实际返回 34 条历史记录，超过原有的 25 条。模拟交互测试与 Windows 自带的 PNG 编解码验证通过。300 条历史的完整容量测试、跨重启及其它系统版本仍待验证；目前先公开源码，不发布稳定版安装包。
 
 ## 怎么用
@@ -36,6 +46,23 @@
 ```powershell
 .\scripts\install.ps1 -Windhawk 'C:\Tools\Windhawk'
 ```
+
+需要重启后自动恢复功能的话，用**管理员 PowerShell**执行一次：
+
+```powershell
+.\scripts\install.ps1 -Windhawk 'C:\Tools\Windhawk' -EnableStartup -StartNow
+```
+
+自启任务名为 `WinVPlus-Windhawk`，只在当前用户登录时运行。选择最高权限是因为扩容 mod 要进入剪贴板服务；普通用户的启动文件夹快捷方式不够。任务不会自动重启系统或清空剪贴板。已经运行的 Windhawk 需要先退出再重新启动，才能加载更新的 DLL。
+
+单独启用或取消自启也可以用（同样需要管理员 PowerShell）：
+
+```powershell
+.\scripts\enable-startup.ps1 -Windhawk 'C:\Tools\Windhawk' -StartNow
+.\scripts\enable-startup.ps1 -Windhawk 'C:\Tools\Windhawk' -Remove
+```
+
+备份在 Windhawk 的 `AppData\WinVPlusBackups\时间戳`。回退时先退出 Windhawk，再把其中的两个 `.ini` 放回 `AppData\Engine\Mods`，两份 `.wh.cpp` 放回 `AppData\ModsSource`。旧 DLL 会保留。`%LOCALAPPDATA%\WinVPlus` 内的收藏文件不由安装脚本修改。
 
 这个脚本只支持默认 AppData 布局的便携版，不给标准安装版写注册表。首次加载时启动 Windhawk。扩容涉及系统剪贴板服务，需要以管理员身份运行 Windhawk；新增标签在下次打开 Win+V 时出现。
 
@@ -99,6 +126,12 @@ Windhawk 的完整离线开发环境明显更大。开发机上的 Compiler 约 
 ```powershell
 npm ci
 npm test
+```
+
+存储缓存另有一个隔离测试，使用真实 Windows JSON 接口和临时数据目录，不读取用户收藏：
+
+```powershell
+.\tests\storage.test.ps1 -Windhawk 'C:\Tools\Windhawk'
 ```
 
 模拟测试不代替真实 Win+V 验收。发布前还需要实际测试：打开面板、右键添加、长文字保存、点击粘贴、关闭重开、清空普通历史后常用语仍在。

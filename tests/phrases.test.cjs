@@ -706,7 +706,7 @@ test('hiding restores native history and right-clicking a favorite has no side e
   const nativeList = document.getElementById('expanded-view-content-lists');
   fixture.activate();
   drainRequests(window);
-  window.__winvPlus.receive({ phrases: [{ id: 'phrase-context-1', text: 'saved phrase' }] });
+  window.__winvPlus.receive({ action: 'load', phrases: [{ id: 'phrase-context-1', text: 'saved phrase' }] });
 
   const card = document.querySelector('.winvplus-card');
   assert.equal(card.querySelector('.winvplus-more'), null);
@@ -731,7 +731,7 @@ test('hiding restores native history and right-clicking a favorite has no side e
   fixture.activate();
   assert.equal(window.__winvPlus.active, true);
   assert.equal(clipboard.isSelected(), false);
-  assert.deepEqual(drainRequests(window), [{ action: 'load' }]);
+  assert.deepEqual(drainRequests(window), [{ action: 'load', revision: '' }]);
   assert.deepEqual(drainRequests(window), []);
 });
 
@@ -790,4 +790,57 @@ test('dispose removes native actions and observer, then reinstall adds each acti
   await waitForMutationObserver(window);
   assert.equal(firstItem.item.actions().filter((action) => action.id === 'winvplus-save').length, 1);
   assert.equal(afterDispose.item.actions().filter((action) => action.id === 'winvplus-save').length, 1);
+});
+
+test('large saved collections create only a page of cards and keep previews across reopen', (t) => {
+  const fixture = createFixture();
+  t.after(() => fixture.dom.window.close());
+  const { window, document, root } = fixture;
+  assert.deepEqual(drainRequests(window), [], 'native clipboard opens without loading favorites');
+  fixture.activate();
+  assert.deepEqual(drainRequests(window), [{ action: 'load', revision: '' }]);
+  const phrases = Array.from({ length: 3000 }, (_, i) => ({
+    id: `large-${i}`, type: 'image', preview: 'data:image/png;base64,c21hbGw=',
+  }));
+  window.__winvPlus.receive({ action: 'load', phrases, revision: 'disk-v1' });
+  assert.equal(document.querySelectorAll('.winvplus-card').length, 24);
+  const first = document.querySelector('.winvplus-card');
+  const image = first.querySelector('img');
+  assert.equal(image.getAttribute('loading'), 'lazy');
+  assert.equal(image.getAttribute('decoding'), 'async');
+  first.querySelector('.winvplus-paste').click();
+  assert.deepEqual(drainRequests(window), [{ action: 'paste', id: 'large-2999' }]);
+  document.querySelector('.winvplus-more').click();
+  assert.equal(document.querySelectorAll('.winvplus-card').length, 48);
+  assert.equal(document.querySelector('.winvplus-card img'), image);
+  root.isLastShowHideEventShow(false);
+  root.isLastShowHideEventShow(true);
+  fixture.activate();
+  window.__winvPlus.refresh();
+  assert.deepEqual(drainRequests(window), [{ action: 'load', revision: 'disk-v1' }], 'one validation request, no duplicate full load');
+  window.__winvPlus.receive({ action: 'load', revision: 'disk-v1' });
+  assert.equal(document.querySelectorAll('.winvplus-card').length, 48);
+  assert.equal(document.querySelector('.winvplus-card img'), image);
+});
+
+test('hundreds of native records and action mutations do not rescan the whole list', async (t) => {
+  const fixture = createFixture();
+  t.after(() => fixture.dom.window.close());
+  const { window, document } = fixture;
+  let fullScans = 0;
+  const query = document.querySelectorAll.bind(document);
+  document.querySelectorAll = (selector) => {
+    if (selector === '#expanded-view-content-lists li.clipboard-history-items-list-item') fullScans++;
+    return query(selector);
+  };
+  const items = Array.from({ length: 300 }, (_, i) => fixture.addTextHistoryItem(`native-${i}`, `text ${i}`));
+  await waitForMutationObserver(window);
+  await waitForMutationObserver(window);
+  assert.equal(fullScans, 0);
+  for (const { item } of items) assert.equal(item.actions().filter((a) => a.id === 'winvplus-save').length, 1);
+  items[0].card.remove();
+  await waitForMutationObserver(window);
+  assert.equal(items[0].item.actions().some((a) => a.id === 'winvplus-save'), false);
+  assert.equal(items[1].item.actions().filter((a) => a.id === 'winvplus-save').length, 1);
+  assert.equal(fullScans, 0);
 });
