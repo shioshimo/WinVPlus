@@ -1,4 +1,5 @@
-param([Parameter(Mandatory=$true)][string]$Windhawk)
+param([Parameter(Mandatory=$true)][string]$Windhawk,
+      [ValidateSet('history-limit','phrases')][string[]]$Mod = @('history-limit','phrases'))
 $ErrorActionPreference = 'Stop'
 $project = Split-Path $PSScriptRoot -Parent
 $compiler = Join-Path $Windhawk 'Compiler\bin\clang++.exe'
@@ -9,7 +10,7 @@ if (!(Test-Path -LiteralPath $compiler) -or !(Test-Path -LiteralPath $library)) 
 $dist = Join-Path $project 'dist'
 New-Item -ItemType Directory -Path $dist -Force | Out-Null
 $ui = Get-Content (Join-Path $project 'ui\phrases.js') -Raw
-foreach ($name in @('history-limit', 'phrases')) {
+foreach ($name in $Mod) {
     $source = Get-Content (Join-Path $project "mods\$name.wh.cpp") -Raw
     if ($source -notmatch '(?m)^// @version\s+(\S+)') { throw "Missing mod version: $name" }
     $version = $Matches[1]

@@ -2,7 +2,7 @@
 // @id              winvplus-phrases
 // @name            WinVPlus - 常用语
 // @description     Add a saved phrases tab to the native Windows 11 clipboard panel.
-// @version         0.2.0
+// @version         0.3.0
 // @author          WinVPlus contributors
 // @license         MIT
 // @include         TextInputHost.exe
@@ -326,6 +326,18 @@ winrt::fire_and_forget PollMessages(controls::WebView view) {
         });
         if (!g_unloading) {
             auto batch = json::JsonObject::Parse(value);
+            static winrt::hstring lastHistoryCache;
+            auto historyCache = batch.GetNamedString(L"historyCache", L"");
+            if (historyCache != lastHistoryCache) {
+                Wh_SetStringValue(L"historyCache", historyCache.c_str());
+                lastHistoryCache = historyCache;
+            }
+            static winrt::hstring lastHistoryCacheError = L"\uffff";
+            auto historyCacheError = batch.GetNamedString(L"historyCacheError", L"");
+            if (historyCacheError != lastHistoryCacheError) {
+                Wh_SetStringValue(L"historyCacheError", historyCacheError.c_str());
+                lastHistoryCacheError = historyCacheError;
+            }
             static winrt::hstring lastUiState;
             auto uiState = batch.GetNamedString(L"uiState", L"");
             if (uiState != lastUiState) {

@@ -1,4 +1,5 @@
-param([Parameter(Mandatory=$true)][string]$Windhawk, [switch]$EnableStartup, [switch]$StartNow)
+param([Parameter(Mandatory=$true)][string]$Windhawk, [switch]$EnableStartup, [switch]$StartNow,
+      [ValidateSet('history-limit','phrases')][string[]]$Mod = @('history-limit','phrases'))
 $ErrorActionPreference = 'Stop'
 $project = Split-Path $PSScriptRoot -Parent
 if (!(Test-Path -LiteralPath (Join-Path $Windhawk 'windhawk.ini'))) { throw 'This installer expects a portable Windhawk folder.' }
@@ -14,7 +15,7 @@ if ($layout -notmatch '(?m)^Portable=1\s*$' -or $layout -notmatch '(?m)^AppDataP
     throw 'Only the default portable AppData layout is supported.'
 }
 # Validate all artifacts before touching an installed mod.
-foreach ($name in @('history-limit','phrases')) {
+foreach ($name in $Mod) {
     foreach ($extension in @('dll','wh.cpp')) {
         if (!(Test-Path -LiteralPath (Join-Path $project "dist\$name.$extension"))) { throw 'Run build.ps1 first.' }
     }
@@ -30,7 +31,7 @@ foreach ($runtime in @('libc++','libunwind')) {
         Copy-Item -LiteralPath (Join-Path $Windhawk "Compiler\x86_64-w64-mingw32\bin\$runtime.dll") -Destination $target
     }
 }
-foreach ($name in @('history-limit','phrases')) {
+foreach ($name in $Mod) {
     $id = if ($name -eq 'phrases') { 'winvplus-phrases' } else { 'winvplus-history-limit' }
     $source = Get-Content -LiteralPath (Join-Path $project "dist\$name.wh.cpp") -Raw
     if ($source -notmatch '(?m)^// @version\s+(\S+)') { throw "Missing version: $name" }
@@ -61,5 +62,5 @@ foreach ($name in @('history-limit','phrases')) {
     [IO.File]::WriteAllText($iniPath, $config, [Text.UnicodeEncoding]::new($false,$true))
 }
 if ($EnableStartup) { & (Join-Path $PSScriptRoot 'enable-startup.ps1') -Windhawk $Windhawk -StartNow:$StartNow }
-Write-Output "Installed both mods. Backup: $backup. Existing limits, enable/disable choices, and phrase files were preserved."
+Write-Output "Installed $($Mod -join ', '). Backup: $backup. Existing limits, enable/disable choices, and phrase files were preserved."
 if (!$StartNow) { Write-Output 'Start or restart portable Windhawk to load the changes.' }

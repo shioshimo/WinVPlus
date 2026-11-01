@@ -115,7 +115,7 @@ function instrumentElementListeners(target, trackedType) {
   return { count() { return active.size; } };
 }
 
-function createFixture() {
+function createFixture(rootSetup) {
   const dom = new JSDOM(fixtureHtml, {
     url: 'https://winvplus.test/',
     runScripts: 'outside-only',
@@ -227,6 +227,8 @@ function createFixture() {
   dataByElement.set(nav, root);
   dataByElement.set(document.getElementById(clipboard.containerHtmlId), clipboard);
 
+  if (rootSetup) rootSetup({ root, ko, window, document, nav });
+
   const documentListeners = instrumentListeners(document, ['contextmenu', 'pointerdown', 'keydown']);
   const navigationListeners = instrumentListeners(nav, ['click']);
   const nativeSetTimeout = window.setTimeout.bind(window);
@@ -248,6 +250,7 @@ function createFixture() {
     window,
     document,
     ko,
+    Date: window.Date,
     setTimeout: setTrackedTimeout,
     clearTimeout: clearTrackedTimeout,
     setInterval: window.setInterval.bind(window),
@@ -356,6 +359,82 @@ function dispatchContextMenu(window, target, button = 2) {
 
 function drainRequests(window) {
   return JSON.parse(JSON.stringify(window.__winvPlus.drain().requests));
+}
+
+function createHistoryCacheHarness({ root, window, document }) {
+  const nativeListeners = new Set();
+  const calls = { initialize: 0, nativeChanges: 0, fetches: 0 };
+  const nativeActivation = makeObservable(false);
+  const pendingResults = [];
+  let fetchHandler = () => Promise.resolve({ items: [{ id: 'history-item' }] });
+
+  function initialize(activation) {
+    calls.initialize++;
+    const callback = () => this.handleClipboardHistoryChange();
+    const update = (enabled) => {
+      if (enabled) nativeListeners.add(callback);
+      else nativeListeners.delete(callback);
+    };
+    activation.subscribe(update);
+    update(activation());
+  }
+  const source = {
+    initialize,
+    fetchAsync(...args) {
+      calls.fetches++;
+      const next = pendingResults.shift();
+      return next ? next(...args) : fetchHandler(...args);
+    },
+    isDataRefreshNecessary() { return true; },
+    handleClipboardHistoryChange() { calls.nativeChanges++; },
+  };
+  const originalFetch = source.fetchAsync;
+  const originalRefresh = source.isDataRefreshNecessary;
+  root.isLastShowHideEventShow.subscribe((visible) => nativeActivation(visible));
+  nativeActivation(root.isLastShowHideEventShow());
+  root.navigationDataModel = {
+    tryGetDataSourceCategoryByView(viewId) {
+      return viewId === 'clipboard' ? [7, undefined] : [undefined, undefined];
+    },
+  };
+  root.dataSourceCollection = {
+    getDataSource(type) {
+      assert.equal(type, 7);
+      if (!source.__nativeInitialized) {
+        source.__nativeInitialized = true;
+        source.initialize(nativeActivation);
+      }
+      return source;
+    },
+  };
+
+  async function openHistory() {
+    if (!source.isDataRefreshNecessary()) return false;
+    const list = document.getElementById('expanded-view-content-lists');
+    list.replaceChildren();
+    const result = await source.fetchAsync();
+    for (const item of result.items || []) {
+      const node = document.createElement('li');
+      node.dataset.historyItemId = item.id;
+      list.appendChild(node);
+    }
+    return true;
+  }
+
+  return {
+    source,
+    originalFetch,
+    originalRefresh,
+    calls,
+    nativeListeners,
+    pendingResults,
+    setFetchHandler(handler) { fetchHandler = handler; },
+    async fireHistoryChanged() {
+      for (const listener of [...nativeListeners]) listener();
+      await Promise.resolve();
+    },
+    openHistory,
+  };
 }
 
 function waitForMutationObserver(window) {
@@ -731,7 +810,7 @@ test('hiding restores native history and right-clicking a favorite has no side e
   fixture.activate();
   assert.equal(window.__winvPlus.active, true);
   assert.equal(clipboard.isSelected(), false);
-  assert.deepEqual(drainRequests(window), [{ action: 'load', revision: '' }]);
+  assert.deepEqual(drainRequests(window), [{ revision: '', action: 'load' }]);
   assert.deepEqual(drainRequests(window), []);
 });
 
@@ -843,4 +922,107 @@ test('hundreds of native records and action mutations do not rescan the whole li
   assert.equal(items[0].item.actions().some((a) => a.id === 'winvplus-save'), false);
   assert.equal(items[1].item.actions().filter((a) => a.id === 'winvplus-save').length, 1);
   assert.equal(fullScans, 0);
+});
+
+test('history cache reuses loaded native rows and invalidates on hidden history changes', async (t) => {
+  let harness;
+  const fixture = createFixture((context) => { harness = createHistoryCacheHarness(context); });
+  t.after(() => fixture.dom.window.close());
+  const { window, document, root } = fixture;
+
+  assert.equal(window.__winvPlus.historyCache.enabled, true);
+  assert.equal(harness.calls.initialize, 2, 'native source and cache each install one subscription');
+  assert.equal(await harness.openHistory(), true, 'first open must fetch');
+  assert.equal(harness.calls.fetches, 1);
+  const list = document.getElementById('expanded-view-content-lists');
+  const firstNode = list.firstElementChild;
+  assert.ok(firstNode);
+
+  assert.equal(await harness.openHistory(), false, 'a clean cache skips the native refresh');
+  assert.equal(harness.calls.fetches, 1);
+  assert.equal(list.firstElementChild, firstNode, 'cache hit preserves the native list node');
+  assert.equal(harness.calls.initialize, 2, 'opening again must not register another listener');
+
+  root.isLastShowHideEventShow(false);
+  assert.equal(harness.nativeListeners.size, 1, 'the native view listener stops while hidden');
+  await harness.fireHistoryChanged();
+  assert.equal(harness.calls.nativeChanges, 0, 'native view listener missed the hidden change');
+  assert.equal(JSON.parse(window.__winvPlus.drain().historyCache).changes, 1,
+    'cache invalidation listener remains active while hidden');
+
+  root.isLastShowHideEventShow(true);
+  assert.equal(await harness.openHistory(), true, 'hidden-time changes force a refresh on reopen');
+  assert.equal(harness.calls.fetches, 2);
+  assert.notEqual(list.firstElementChild, firstNode, 'successful refresh rebuilds the native list');
+  assert.equal(await harness.openHistory(), false, 'successful refresh restores cache hits');
+  assert.equal(harness.calls.fetches, 2);
+});
+
+test('history cache keeps invalidations during fetches and retries failed or empty results', async (t) => {
+  let harness;
+  const fixture = createFixture((context) => { harness = createHistoryCacheHarness(context); });
+  t.after(() => fixture.dom.window.close());
+  const { window } = fixture;
+  let resolveFetch;
+  harness.setFetchHandler(() => new Promise((resolve) => { resolveFetch = resolve; }));
+
+  const opening = harness.openHistory();
+  await Promise.resolve();
+  await harness.fireHistoryChanged();
+  resolveFetch({ items: [{ id: 'fetched-before-event' }] });
+  await opening;
+  assert.equal(harness.source.isDataRefreshNecessary(), true,
+    'a change after fetch start must not be cleared by that fetch completing');
+
+  harness.setFetchHandler(() => Promise.resolve({ items: [{ id: 'after-event' }] }));
+  assert.equal(await harness.openHistory(), true);
+  assert.equal(harness.source.isDataRefreshNecessary(), false);
+
+  await harness.fireHistoryChanged();
+  harness.pendingResults.push(() => Promise.reject(new Error('native fetch failed')));
+  await assert.rejects(harness.openHistory(), /native fetch failed/);
+  assert.equal(harness.source.isDataRefreshNecessary(), true, 'failed results stay stale');
+  assert.equal(await harness.openHistory(), true, 'a failed fetch is retried');
+
+  await harness.fireHistoryChanged();
+  harness.pendingResults.push(() => Promise.resolve({ items: [] }));
+  assert.equal(await harness.openHistory(), true);
+  assert.equal(harness.source.isDataRefreshNecessary(), true, 'empty history is not cached as complete');
+  assert.equal(await harness.openHistory(), true, 'empty history is retried on the next open');
+  assert.equal(harness.calls.fetches, 6);
+  assert.equal(harness.source.isDataRefreshNecessary(), false);
+  assert.equal(JSON.parse(window.__winvPlus.drain().historyCache).fetches, 6);
+});
+
+test('history cache expires after five minutes and dispose restores the native source', async (t) => {
+  let harness;
+  const fixture = createFixture((context) => { harness = createHistoryCacheHarness(context); });
+  t.after(() => fixture.dom.window.close());
+  const { window } = fixture;
+  const originalFetch = harness.originalFetch;
+  const originalRefresh = harness.originalRefresh;
+  let now = 10_000;
+  window.Date.now = () => now;
+
+  assert.equal(await harness.openHistory(), true);
+  assert.equal(await harness.openHistory(), false);
+  now += 300_001;
+  assert.equal(await harness.openHistory(), true, 'the five-minute safety timeout refreshes history');
+  assert.equal(harness.calls.fetches, 2);
+
+  window.__winvPlus.dispose();
+  assert.equal(harness.source.fetchAsync, originalFetch);
+  assert.equal(harness.source.isDataRefreshNecessary, originalRefresh);
+  assert.equal(harness.nativeListeners.size, 1, 'dispose removes only its own listener');
+  const changes = JSON.parse(window.__winvPlus?.drain?.().historyCache || '{}').changes;
+  await harness.fireHistoryChanged();
+  assert.equal(harness.calls.nativeChanges, 1, 'native listener still works after cache disposal');
+  assert.equal(changes, undefined, 'disposed cache state is no longer exposed');
+
+  window.__winvPlus = undefined;
+  fixture.inject();
+  assert.equal(harness.calls.initialize, 3, 'reinstall registers one fresh cache listener');
+  assert.equal(harness.nativeListeners.size, 2);
+  window.__winvPlus.dispose();
+  assert.equal(harness.nativeListeners.size, 1, 'repeated dispose leaves no cache listener behind');
 });

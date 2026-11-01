@@ -8,6 +8,75 @@
   var cards = new Map(), removal;
   var nativeCards = new Map(), moreButton, renderLimit = 24, loadPending = false;
   var saveActionId = 'winvplus-save';
+  var disposeHistoryCache;
+
+  function installHistoryCache() {
+    var collection = root.dataSourceCollection, navigation = root.navigationDataModel;
+    if (!collection || !navigation || typeof navigation.tryGetDataSourceCategoryByView !== 'function') return;
+    var source, active, subscriptions = [], originalFetch, originalRefresh, fetchCached, needsRefresh;
+    function cleanup() {
+      if (active) active(false);
+      subscriptions.forEach(function (subscription) { subscription.dispose(); });
+      if (source && source.fetchAsync === fetchCached) source.fetchAsync = originalFetch;
+      if (source && source.isDataRefreshNecessary === needsRefresh) source.isDataRefreshNecessary = originalRefresh;
+    }
+    try {
+      var type = navigation.tryGetDataSourceCategoryByView('clipboard')[0];
+      if (type === undefined || type === null) return;
+      source = collection.getDataSource(type);
+      if (!source || typeof source.fetchAsync !== 'function' || typeof source.initialize !== 'function'
+          || typeof source.handleClipboardHistoryChange !== 'function'
+          || typeof source.isDataRefreshNecessary !== 'function') return;
+      originalFetch = source.fetchAsync;
+      originalRefresh = source.isDataRefreshNecessary;
+      var generation = 0, loadedGeneration = -1, loadedAt = 0, pending = 0, latestFetch = 0;
+      var stats = S.historyCache = { enabled: false, fetches: 0, hits: 0, changes: 0 };
+      // Windows stops its own history subscription while the panel is hidden.
+      // Use its initializer to register a separate invalidation-only listener.
+      // A private activation observable lets dispose remove that native listener.
+      active = ko.observable(true);
+      var activation = function () { return active(); };
+      activation.subscribe = function (callback) {
+        var subscription = active.subscribe(callback);
+        subscriptions.push(subscription);
+        return subscription;
+      };
+      var listener = Object.create(source);
+      listener.handleClipboardHistoryChange = function () { ++generation; ++stats.changes; };
+      source.initialize.call(listener, activation);
+      if (subscriptions.length !== 1) { cleanup(); return; }
+      needsRefresh = function () {
+        // Periodically recheck policy/cloud settings even if no history event fires.
+        var stale = pending > 0 || loadedGeneration !== generation || Date.now() - loadedAt >= 300000;
+        if (!stale) ++stats.hits;
+        return stale;
+      };
+      fetchCached = function () {
+        var started, args = arguments, request = ++latestFetch;
+        loadedGeneration = -1;
+        ++pending; ++stats.fetches;
+        return Promise.resolve().then(function () {
+          started = generation;
+          return originalFetch.apply(source, args);
+        }).then(function (result) {
+          // Disabled, empty and failed results keep the native refresh behavior.
+          // A change arriving during fetch must survive until the next refresh.
+          if (!S.disposed && request === latestFetch && result && result.items && result.items.length && started === generation) {
+            loadedGeneration = started; loadedAt = Date.now();
+          }
+          --pending;
+          return result;
+        }, function (error) { --pending; if (request === latestFetch) loadedGeneration = -1; throw error; });
+      };
+      source.fetchAsync = fetchCached;
+      source.isDataRefreshNecessary = needsRefresh;
+      stats.enabled = true;
+      disposeHistoryCache = cleanup;
+    } catch (error) {
+      cleanup();
+      S.historyCacheError = String(error.message || error);
+    }
+  }
 
   function el(tag, cls, text) {
     var node = document.createElement(tag);
@@ -24,7 +93,9 @@
     return {
       visible: !root || !ko.isObservable(root.isLastShowHideEventShow) || root.isLastShowHideEventShow(),
       menuClicks: S.menuClicks,
-      uiState: JSON.stringify({version:'incremental-2',active:S.active,event:S.lastEvent,error:S.scriptError,transition:S.lastTransition,animation:S.lastAnimation,created:S.created,visible:root && ko.unwrap(root.isLastShowHideEventShow),viewId:root && ko.unwrap(root.currentViewId),nav:rootNav() ? rootNav().offsetHeight : -1,view:view ? view.offsetHeight : -1}),
+      historyCache: JSON.stringify(S.historyCache || {}),
+      historyCacheError: S.historyCacheError || '',
+      uiState: JSON.stringify({version:'history-cache-1',active:S.active,event:S.lastEvent,error:S.scriptError,transition:S.lastTransition,animation:S.lastAnimation,created:S.created,visible:root && ko.unwrap(root.isLastShowHideEventShow),viewId:root && ko.unwrap(root.currentViewId),nav:rootNav() ? rootNav().offsetHeight : -1,view:view ? view.offsetHeight : -1}),
       requests: S.outbox.splice(0)
     };
   };
@@ -231,6 +302,7 @@
   S.refresh = function () { if (S.ready) { scanHistory(); if (S.active) requestLoad(); } };
   S.dispose = function () {
     S.disposed = true;
+    if (disposeHistoryCache) disposeHistoryCache();
     clearInterval(S.timer);
     if (removal) { removal.stop(); removal = null; }
     if (S.ready) {
@@ -328,6 +400,7 @@
     scanHistory();
     observer = new window.MutationObserver(scanHistory);
     observer.observe(document.getElementById('expanded-view-content-lists'), { childList: true, subtree: true });
+    installHistoryCache();
     S.ready = true; return true;
   }
   if (!install()) {

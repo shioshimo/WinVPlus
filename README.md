@@ -1,5 +1,16 @@
 # WinVPlus
 
+0.3.0 改善了反复打开 Win+V 时的加载：历史未变化时复用现有列表和预览。面板隐藏时仍监听历史变化，复制、删除、置顶或清空后会重新读取；首次打开和每隔五分钟也会检查一次。缓存只留在当前面板进程的内存中。
+
+仅更新面板插件（保留历史容量插件和设置）：
+
+```powershell
+.\scripts\build.ps1 -Windhawk 'D:\muridesu\Windhawk' -Mod phrases
+.\scripts\install.ps1 -Windhawk 'D:\muridesu\Windhawk' -Mod phrases
+```
+
+更新后重启 Windhawk。Windows 页面内部结构不匹配时，缓存优化会自动停用，继续使用原生加载流程。
+
 对WIN原生的剪切板的改进 并且尽量保持了一致的设计语言 历史上限从 25 条改成 300 条且新增了常用语功能
 
 <p align="center">
