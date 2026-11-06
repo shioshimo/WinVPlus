@@ -1,6 +1,6 @@
 {
   "name": "winvplus",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "300 clipboard history items and saved phrases inside the native Windows 11 Win+V panel",
   "license": "MIT",

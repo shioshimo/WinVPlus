@@ -79,6 +79,18 @@ function makeObservableArray(initialValue) {
     return removed;
   };
   observable.indexOf = (item) => observable().indexOf(item);
+  observable.push = (...items) => {
+    const current = observable();
+    const length = current.push(...items);
+    observable(current);
+    return length;
+  };
+  observable.splice = (...args) => {
+    const current = observable();
+    const removed = current.splice(...args);
+    observable(current);
+    return removed;
+  };
   return observable;
 }
 
@@ -154,6 +166,12 @@ function createFixture(rootSetup) {
   const ko = {
     observable: makeObservable,
     observableArray: makeObservableArray,
+    pureComputed(read) {
+      const computed = () => read();
+      computed.__isObservable = true;
+      computed.dispose = () => {};
+      return computed;
+    },
     isObservable(value) { return !!(value && value.__isObservable); },
     unwrap(value) { return this.isObservable(value) ? value() : value; },
     dataFor(element) { return dataByElement.get(element); },
@@ -227,7 +245,7 @@ function createFixture(rootSetup) {
   dataByElement.set(nav, root);
   dataByElement.set(document.getElementById(clipboard.containerHtmlId), clipboard);
 
-  if (rootSetup) rootSetup({ root, ko, window, document, nav });
+  if (rootSetup) rootSetup({ root, ko, window, document, nav, dataByElement });
 
   const documentListeners = instrumentListeners(document, ['contextmenu', 'pointerdown', 'keydown']);
   const navigationListeners = instrumentListeners(nav, ['click']);
@@ -437,8 +455,91 @@ function createHistoryCacheHarness({ root, window, document }) {
   };
 }
 
+function createHistoryPagerHarness(context, recordCount = 300) {
+  const harness = createHistoryCacheHarness(context);
+  const { root, ko, document } = context;
+  const calls = harness.calls;
+  calls.cleanup = [];
+  calls.clearAll = 0;
+  harness.calls = calls;
+  const models = Array.from({ length: recordCount }, (_, index) => ({
+    id: `native-${index + 1}`,
+    isClearAllApplicable: () => index >= 10,
+  }));
+  let fetchHandler = () => Promise.resolve({ items: models.slice() });
+  harness.source.fetchAsync = function (...args) {
+    calls.fetches++;
+    const next = harness.pendingResults.shift();
+    return next ? next(...args) : fetchHandler(...args);
+  };
+  harness.originalFetch = harness.source.fetchAsync;
+  harness.setFetchHandler = (handler) => { fetchHandler = handler; };
+  harness.source.thumbnailUrlCache = {
+    historyItemThumbnailUrlCache: new Map(),
+    cleanupHistoryItemThumbnails(items) { calls.cleanup.push(items.map((item) => item.id)); },
+  };
+  const creator = {
+    create(list) {
+      return [{ isEnabled: () => ko.unwrap(list.items).some((item) => item.isClearAllApplicable()),
+        asyncHandler() { calls.clearAll++; return Promise.resolve(); } }];
+    },
+  };
+  const originalCreate = creator.create;
+  const config = { datasource: 7, listActionsCreator: creator };
+  const lists = ko.observableArray([]);
+  root.expandedViewModel = {
+    viewLists: lists,
+    getListConfig(type) { return type === 7 ? config : undefined; },
+  };
+  root.navigationDataModel.tryGetDataSourceCategoryByView = (viewId) =>
+    ['clipboard', 'clipboard-history'].includes(viewId) ? [7, undefined] : [undefined, undefined];
+  const content = document.getElementById('expanded-view-content');
+  Object.defineProperties(content, {
+    clientHeight: { configurable: true, value: 100 },
+    scrollHeight: { configurable: true, writable: true, value: 500 },
+    scrollTop: { configurable: true, writable: true, value: 0 },
+  });
+
+  function render(list) {
+    const container = document.getElementById('expanded-view-content-lists');
+    const nodes = new Map();
+    const draw = (items) => {
+      const wanted = new Set(items.map((item) => item.id));
+      for (const [id, node] of nodes) if (!wanted.has(id)) { node.remove(); nodes.delete(id); }
+      items.forEach((item) => {
+        if (nodes.has(item.id)) return;
+        const node = document.createElement('li');
+        node.className = 'clipboard-history-items-list-item';
+        node.dataset.historyItemId = item.id;
+        nodes.set(item.id, node);
+        container.appendChild(node);
+      });
+    };
+    list.items.subscribe(draw);
+    draw(list.items());
+    return nodes;
+  }
+  async function openHistory() {
+    if (!harness.source.isDataRefreshNecessary()) return false;
+    document.getElementById('expanded-view-content-lists').replaceChildren();
+    lists([]);
+    const result = await harness.source.fetchAsync({ query: '', offset: 0, max: 10 });
+    const list = { config, items: ko.observableArray(result.items), listActions: [] };
+    list.listActions = creator.create(list);
+    const nodes = render(list);
+    list.__nodes = nodes;
+    lists([list]);
+    return true;
+  }
+  return { ...harness, calls, models, creator, originalCreate, config, lists, content, openHistory };
+}
+
 function waitForMutationObserver(window) {
   return new Promise((resolve) => window.queueMicrotask(resolve));
+}
+
+function flushAsync() {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 function addRemovalAnimationStyle(document, duration = '.333s') {
@@ -1025,4 +1126,139 @@ test('history cache expires after five minutes and dispose restores the native s
   assert.equal(harness.nativeListeners.size, 2);
   window.__winvPlus.dispose();
   assert.equal(harness.nativeListeners.size, 1, 'repeated dispose leaves no cache listener behind');
+});
+
+test('history pager builds native first-page rows, appends pages, and keeps Clear All bound to full history', async (t) => {
+  let harness;
+  const fixture = createFixture((context) => { harness = createHistoryPagerHarness(context); });
+  t.after(() => fixture.dom.window.close());
+  const { window, document } = fixture;
+
+  assert.equal(await harness.openHistory(), true);
+  const list = harness.lists()[0];
+  const firstNode = list.__nodes.get('native-1');
+  assert.equal(list.items().length, 10, 'the native binding constructs only the first ten rows');
+  assert.ok(firstNode?.isConnected);
+  assert.equal(window.__winvPlus.historyCache.total, 300);
+  const clearAll = list.listActions[0];
+  assert.equal(clearAll.isEnabled(), true, 'the eleventh full-snapshot model enables native Clear All');
+  await clearAll.asyncHandler();
+  assert.equal(harness.calls.clearAll, 1, 'the native Clear All handler remains intact');
+
+  const button = document.querySelector('.winvplus-history-more');
+  assert.ok(button);
+  button.click();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(list.items().length, 20);
+  assert.equal(list.__nodes.get('native-1'), firstNode, 'page append preserves existing native nodes');
+
+  harness.content.scrollTop = 500;
+  harness.content.dispatchEvent(new window.Event('scroll'));
+  await flushAsync();
+  assert.equal(list.items().length, 30, 'scrolling near the footer loads another page');
+
+  fixture.root.isLastShowHideEventShow(false);
+  fixture.root.isLastShowHideEventShow(true);
+  let resolveTail;
+  harness.setFetchHandler(() => new Promise((resolve) => { resolveTail = resolve; }));
+  button.click();
+  button.click();
+  await flushAsync();
+  assert.equal(harness.calls.fetches, 2, 'concurrent tail clicks share one native fetch');
+  resolveTail({ items: harness.models.slice() });
+  await flushAsync();
+  assert.equal(list.items().length, 20, 'overlapping button clicks append one page only after hide resets the span');
+});
+
+test('history pager releases tail models on hide, reloads tail on demand, and retries failed pages', async (t) => {
+  let harness;
+  const fixture = createFixture((context) => { harness = createHistoryPagerHarness(context); });
+  t.after(() => fixture.dom.window.close());
+  const { window, document, root } = fixture;
+  await harness.openHistory();
+  const list = harness.lists()[0];
+  document.querySelector('.winvplus-history-more').click();
+  await flushAsync();
+  assert.equal(list.items().length, 20);
+
+  root.isLastShowHideEventShow(false);
+  assert.equal(list.items().length, 10, 'hiding trims the native observable list to its head page');
+  assert.ok(harness.calls.cleanup.at(-1).length <= 20, 'thumbnail cleanup receives only retained head models');
+  root.isLastShowHideEventShow(true);
+  assert.equal(await harness.openHistory(), false, 'reopening hits the cached first page');
+  assert.equal(harness.calls.fetches, 1);
+  document.querySelector('.winvplus-history-more').click();
+  await flushAsync();
+  assert.equal(list.items().length, 20, 'paging after release fetches and appends the tail again');
+  assert.equal(harness.calls.fetches, 2);
+
+  root.isLastShowHideEventShow(false);
+  root.isLastShowHideEventShow(true);
+  await harness.openHistory();
+  harness.pendingResults.push(() => Promise.reject(new Error('tail page failed')));
+  document.querySelector('.winvplus-history-more').click();
+  await flushAsync();
+  assert.equal(list.items().length, 10, 'failed tail fetch leaves the head visible');
+  assert.equal(window.__winvPlus.historyCache.enabled, true, 'tail failure does not invalidate the head cache');
+  document.querySelector('.winvplus-history-more').click();
+  await flushAsync();
+  assert.equal(list.items().length, 20, 'a failed tail fetch can be retried');
+});
+
+test('history pager drops in-flight pages after change, navigation, or hide and disposes its UI hooks', async (t) => {
+  let harness;
+  const fixture = createFixture((context) => { harness = createHistoryPagerHarness(context); });
+  t.after(() => fixture.dom.window.close());
+  const { window, document, root } = fixture;
+  await harness.openHistory();
+  const list = harness.lists()[0];
+  const button = document.querySelector('.winvplus-history-more');
+  let resolveTail;
+  harness.setFetchHandler(() => new Promise((resolve) => { resolveTail = resolve; }));
+
+  root.isLastShowHideEventShow(false);
+  root.isLastShowHideEventShow(true);
+  button.click();
+  await flushAsync();
+  await harness.fireHistoryChanged();
+  resolveTail({ items: harness.models.slice() });
+  await flushAsync();
+  assert.equal(list.items().length, 10, 'a generation change prevents a stale append');
+
+  harness.setFetchHandler(() => Promise.resolve({ items: harness.models.slice() }));
+  // Refresh native history, then defer another page while changing views.
+  assert.equal(await harness.openHistory(), true);
+  const currentList = harness.lists()[0];
+  const currentButton = document.querySelector('.winvplus-history-more');
+  harness.setFetchHandler(() => new Promise((resolve) => { resolveTail = resolve; }));
+  root.isLastShowHideEventShow(false);
+  root.isLastShowHideEventShow(true);
+  currentButton.click();
+  await flushAsync();
+  root.currentViewId('settings');
+  resolveTail({ items: harness.models.slice() });
+  await flushAsync();
+  assert.equal(currentList.items().length, 10, 'navigation prevents a stale append');
+
+  root.currentViewId('clipboard-history');
+  root.isLastShowHideEventShow(false);
+  root.isLastShowHideEventShow(true);
+  harness.setFetchHandler(() => new Promise((resolve) => { resolveTail = resolve; }));
+  document.querySelector('.winvplus-history-more').click();
+  await flushAsync();
+  root.isLastShowHideEventShow(false);
+  resolveTail({ items: harness.models.slice() });
+  await flushAsync();
+  assert.equal(currentList.items().length, 10, 'hiding prevents an in-flight tail append');
+
+  window.__winvPlus.dispose();
+  assert.equal(document.querySelector('.winvplus-history-footer'), null);
+  assert.equal(harness.creator.create, harness.originalCreate, 'dispose restores the native action creator');
+  const fetches = harness.calls.fetches;
+  button.click();
+  harness.content.scrollTop = 500;
+  harness.content.dispatchEvent(new window.Event('scroll'));
+  assert.equal(harness.calls.fetches, fetches, 'disposed controls no longer initiate page loads');
+  assert.equal(harness.source.isDataRefreshNecessary, harness.originalRefresh);
 });

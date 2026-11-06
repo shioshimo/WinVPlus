@@ -2,7 +2,7 @@
 // @id              winvplus-phrases
 // @name            WinVPlus - 常用语
 // @description     Add a saved phrases tab to the native Windows 11 clipboard panel.
-// @version         0.3.0
+// @version         0.4.0
 // @author          WinVPlus contributors
 // @license         MIT
 // @include         TextInputHost.exe

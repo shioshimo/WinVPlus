@@ -13,8 +13,9 @@
   function installHistoryCache() {
     var collection = root.dataSourceCollection, navigation = root.navigationDataModel;
     if (!collection || !navigation || typeof navigation.tryGetDataSourceCategoryByView !== 'function') return;
-    var source, active, subscriptions = [], originalFetch, originalRefresh, fetchCached, needsRefresh;
+    var source, active, subscriptions = [], originalFetch, originalRefresh, fetchCached, needsRefresh, pager;
     function cleanup() {
+      if (pager) pager.dispose();
       if (active) active(false);
       subscriptions.forEach(function (subscription) { subscription.dispose(); });
       if (source && source.fetchAsync === fetchCached) source.fetchAsync = originalFetch;
@@ -51,12 +52,13 @@
         if (!stale) ++stats.hits;
         return stale;
       };
-      fetchCached = function () {
-        var started, args = arguments, request = ++latestFetch;
-        loadedGeneration = -1;
+      function fetchNative(args, retainHead) {
+        var started, startedAt, request = ++latestFetch;
+        if (!retainHead) loadedGeneration = -1;
         ++pending; ++stats.fetches;
         return Promise.resolve().then(function () {
           started = generation;
+          startedAt = Date.now();
           return originalFetch.apply(source, args);
         }).then(function (result) {
           // Disabled, empty and failed results keep the native refresh behavior.
@@ -65,8 +67,24 @@
             loadedGeneration = started; loadedAt = Date.now();
           }
           --pending;
+          stats.lastFetchMs = Date.now() - startedAt;
+          if (pager && !S.disposed && request === latestFetch) pager.accept(result, started === generation);
           return result;
-        }, function (error) { --pending; if (request === latestFetch) loadedGeneration = -1; throw error; });
+        }, function (error) { --pending; if (request === latestFetch && !retainHead) loadedGeneration = -1; throw error; });
+      };
+      pager = createHistoryPager(source, type, stats, fetchNative, function () {
+        return loadedGeneration === generation && Date.now() - loadedAt < 300000;
+      }, function () { return generation; });
+      fetchCached = function () {
+        var args = Array.prototype.slice.call(arguments);
+        if (pager) {
+          pager.queryArgs = args;
+          if (!pending && loadedGeneration === generation && Date.now() - loadedAt < 300000 && pager.hasSnapshot()) {
+            ++stats.hits;
+            return Promise.resolve(pager.firstPage());
+          }
+        }
+        return fetchNative(args).then(function (result) { return pager ? pager.firstPage(result) : result; });
       };
       source.fetchAsync = fetchCached;
       source.isDataRefreshNecessary = needsRefresh;
@@ -76,6 +94,167 @@
       cleanup();
       S.historyCacheError = String(error.message || error);
     }
+  }
+
+  function createHistoryPager(source, type, stats, fetchNative, isFresh, generation) {
+    var expanded = root.expandedViewModel;
+    if (!expanded || !ko.isObservable(expanded.viewLists) || typeof expanded.viewLists.subscribe !== 'function'
+        || typeof ko.pureComputed !== 'function') return null;
+    var content = document.getElementById('expanded-view-content');
+    var nativeLists = document.getElementById('expanded-view-content-lists');
+    if (!content || !nativeLists) return null;
+    var pageSize = 10, snapshot, total = 0, snapshotGeneration = -1, busy = false, disposed = false, ownedList;
+    var clearable = ko.observable(false), footer = el('div', 'winvplus-history-footer');
+    var button = el('button', 'winvplus-history-more', '继续加载');
+    button.type = 'button'; footer.hidden = true; footer.appendChild(button);
+    nativeLists.parentNode.insertBefore(footer, nativeLists.nextSibling);
+    var creator = expanded.getListConfig && expanded.getListConfig(type);
+    creator = creator && creator.listActionsCreator;
+    var originalCreate = creator && creator.create, patchedCreate;
+    // Clear All must use the full snapshot, even if the visible page is all pinned.
+    if (typeof originalCreate === 'function') {
+      patchedCreate = function () {
+        var actions = originalCreate.apply(this, arguments);
+        if (actions.length === 1 && typeof actions[0].isEnabled === 'function') {
+          var action = actions[0], originalEnabled = action.isEnabled;
+          action.__winvPlusEnabled = originalEnabled;
+          action.isEnabled = ko.pureComputed(function () { return clearable(); });
+        }
+        return actions;
+      };
+      creator.create = patchedCreate;
+    }
+    function nativeList() {
+      return ko.unwrap(expanded.viewLists).find(function (entry) {
+        return entry.config && entry.config.datasource === type && ko.isObservable(entry.items);
+      });
+    }
+    function visible() {
+      return !disposed && !S.active && ko.unwrap(root.isLastShowHideEventShow)
+        && root.navigationDataModel.tryGetDataSourceCategoryByView(ko.unwrap(root.currentViewId))[0] === type;
+    }
+    function refresh() {
+      var list = nativeList(), count = list ? ko.unwrap(list.items).length : 0;
+      if (snapshot && list && (ownedList || count <= pageSize)) ownedList = list;
+      stats.rendered = count; stats.total = total;
+      stats.retained = snapshot ? snapshot.items.length : 0;
+      var cache = source.thumbnailUrlCache && source.thumbnailUrlCache.historyItemThumbnailUrlCache;
+      if (cache) stats.thumbnails = cache.size;
+      footer.hidden = !visible() || !list || !snapshot || !isFresh() || count >= total;
+      button.disabled = busy;
+      button.textContent = busy ? '加载中…' : '继续加载';
+      button.setAttribute('aria-label', '继续加载 ' + Math.min(pageSize, Math.max(0, total - count)) + ' 条记录');
+    }
+    function release() {
+      var list = nativeList(), head;
+      if (list) {
+        ko.unwrap(list.items).slice(pageSize).forEach(function (item) {
+          if (item.deferredBindingObserver) {
+            item.deferredBindingObserver.disconnect(); delete item.deferredBindingObserver;
+          }
+          if (item.deferredBindingTimerId) {
+            window.clearTimeout(item.deferredBindingTimerId); delete item.deferredBindingTimerId;
+          }
+          if (typeof item.clearViewPortIntersectionCallback === 'function') item.clearViewPortIntersectionCallback();
+        });
+        if (ko.unwrap(list.items).length > pageSize && typeof list.items.splice === 'function') list.items.splice(pageSize);
+        head = ko.unwrap(list.items).slice(0, pageSize);
+      }
+      // Keep only the first page alive between openings. Previously viewed tail
+      // models and their decoded images can be collected; metadata is fetched
+      // again only if the user scrolls beyond this retained page.
+      if (snapshot) snapshot = Object.assign({}, snapshot, { items: snapshot.items.slice(0, pageSize) });
+      var cache = source.thumbnailUrlCache;
+      if (cache && typeof cache.cleanupHistoryItemThumbnails === 'function') {
+        try { cache.cleanupHistoryItemThumbnails((head || []).concat(snapshot ? snapshot.items : [])); }
+        catch (error) { S.historyCacheError = String(error.message || error); }
+      }
+      refresh();
+    }
+    async function loadMore() {
+      var list = nativeList();
+      if (busy || !visible() || !list || !snapshot || !isFresh()) return;
+      var before = ko.unwrap(list.items).slice(), offset = before.length, version = generation();
+      if (offset >= total) return;
+      busy = true; refresh();
+      try {
+        if (snapshot.items.length < Math.min(total, offset + pageSize)) await fetchNative(pager.queryArgs || [], true);
+        // Never append a page from a different history generation or into a
+        // replacement list created by navigation, deletion, or another refresh.
+        if (!visible() || nativeList() !== list || generation() !== version || snapshotGeneration !== version || !snapshot) return;
+        var current = ko.unwrap(list.items);
+        if (current.length !== offset || current.some(function (item, index) { return item !== before[index]; })) return;
+        var ids = new Set(current.map(function (item) { return item.id; }));
+        var next = snapshot.items.slice(offset, offset + pageSize).filter(function (item) { return !ids.has(item.id); });
+        if (next.length && typeof list.items.push === 'function') {
+          var scrollTop = content.scrollTop;
+          list.items.push.apply(list.items, next);
+          content.scrollTop = scrollTop;
+        }
+        ++stats.pages;
+      } catch (error) {
+        S.historyCacheError = String(error.message || error);
+      } finally { busy = false; refresh(); }
+    }
+    function onScroll() {
+      if (!footer.hidden && content.clientHeight > 0 && content.scrollHeight - content.scrollTop - content.clientHeight < 180) loadMore();
+    }
+    button.addEventListener('click', loadMore);
+    content.addEventListener('scroll', onScroll, { passive: true });
+    var intersection;
+    if (typeof window.IntersectionObserver === 'function') {
+      intersection = new window.IntersectionObserver(function (entries) {
+        if (entries.some(function (entry) { return entry.isIntersecting || entry.intersectionRatio > 0; }) && content.clientHeight > 0 && !footer.hidden) loadMore();
+      }, { root: content, rootMargin: '0px 0px 160px 0px' });
+      intersection.observe(footer);
+    }
+    var subscription = expanded.viewLists.subscribe(refresh);
+    var pager = {
+      queryArgs: [],
+      refresh: refresh,
+      release: release,
+      hasSnapshot: function () { return !!snapshot; },
+      accept: function (result, valid) {
+        if (disposed) return;
+        snapshot = valid && result && result.items ? result : null;
+        total = snapshot ? snapshot.items.length : 0;
+        snapshotGeneration = valid ? generation() : -1;
+        clearable(!!snapshot && snapshot.items.some(function (item) {
+          return typeof item.isClearAllApplicable === 'function' && item.isClearAllApplicable();
+        }));
+        if (!visible() && snapshot) snapshot = Object.assign({}, snapshot, { items: snapshot.items.slice(0, pageSize) });
+        refresh();
+      },
+      firstPage: function (result) {
+        result = result || snapshot;
+        var list = nativeList(), limit = pageSize;
+        // Keep the user's loaded span during live pin/delete/copy updates.
+        // Closing the panel resets that span to one page in release().
+        if (visible() && list && list === ownedList) limit = Math.max(pageSize, ko.unwrap(list.items).length);
+        return result ? Object.assign({}, result, { items: result.items.slice(0, limit), itemCountBeforeTruncation: total || result.items.length }) : result;
+      },
+      dispose: function () {
+        disposed = true;
+        if (intersection) intersection.disconnect();
+        subscription.dispose();
+        content.removeEventListener('scroll', onScroll);
+        button.removeEventListener('click', loadMore);
+        if (creator && creator.create === patchedCreate) creator.create = originalCreate;
+        var list = nativeList();
+        if (list && list.listActions) list.listActions.forEach(function (action) {
+          if (action.__winvPlusEnabled) {
+            action.isEnabled.dispose(); action.isEnabled = action.__winvPlusEnabled;
+            delete action.__winvPlusEnabled;
+          }
+        });
+        footer.remove(); snapshot = null;
+        if (S.historyPager === pager) delete S.historyPager;
+      }
+    };
+    stats.paging = true; stats.pageSize = pageSize; stats.pages = 0;
+    S.historyPager = pager;
+    if (!ko.unwrap(root.isLastShowHideEventShow)) release();
+    return pager;
   }
 
   function el(tag, cls, text) {
@@ -95,7 +274,7 @@
       menuClicks: S.menuClicks,
       historyCache: JSON.stringify(S.historyCache || {}),
       historyCacheError: S.historyCacheError || '',
-      uiState: JSON.stringify({version:'history-cache-1',active:S.active,event:S.lastEvent,error:S.scriptError,transition:S.lastTransition,animation:S.lastAnimation,created:S.created,visible:root && ko.unwrap(root.isLastShowHideEventShow),viewId:root && ko.unwrap(root.currentViewId),nav:rootNav() ? rootNav().offsetHeight : -1,view:view ? view.offsetHeight : -1}),
+      uiState: JSON.stringify({version:'history-paging-1',active:S.active,event:S.lastEvent,error:S.scriptError,transition:S.lastTransition,animation:S.lastAnimation,created:S.created,visible:root && ko.unwrap(root.isLastShowHideEventShow),viewId:root && ko.unwrap(root.currentViewId),nav:rootNav() ? rootNav().offsetHeight : -1,view:view ? view.offsetHeight : -1}),
       requests: S.outbox.splice(0)
     };
   };
@@ -127,6 +306,7 @@
       selectedBefore.forEach(function (item) { item.isSelected(item.id === ko.unwrap(root.currentViewId)); });
       selectedBefore = [];
     }
+    if (S.historyPager) S.historyPager.refresh();
   }
   function render() {
     if (!list || removal) return;
@@ -260,6 +440,7 @@
         return false;
       });
     }
+    if (S.historyPager) S.historyPager.refresh();
   }
   function onContext(e) {
     if (S.active) {
@@ -349,7 +530,12 @@
       '.winvplus-empty-icon{font:26px "Segoe Fluent Icons","Segoe MDL2 Assets";margin-bottom:12px;opacity:.55}',
       '.winvplus-empty p{font-size:12px;opacity:.6;margin:8px 0}',
       '.winvplus-more{display:block;margin:8px auto 16px;padding:8px 16px;font:inherit;color:inherit;background:transparent;border:1px solid currentColor;border-radius:4px}',
-      '.winvplus-more[hidden]{display:none}'
+      '.winvplus-more[hidden]{display:none}',
+      '.winvplus-history-footer{padding:2px 14px 14px;text-align:center;overflow-anchor:none}',
+      '.winvplus-history-footer[hidden]{display:none!important}',
+      '.winvplus-history-more{font:inherit;font-size:12px;color:inherit;opacity:.72;border:0;border-radius:6px;background:transparent;padding:9px 20px;cursor:default}',
+      '.winvplus-history-more:hover{opacity:1;background:rgba(128,128,128,.12)}',
+      '.winvplus-history-more:focus-visible{outline:2px solid currentColor;outline-offset:2px}'
     ].join('\n');
     document.head.appendChild(style);
 
@@ -394,9 +580,12 @@
     document.addEventListener('contextmenu', onContext, true);
     window.addEventListener('error', onScriptError);
     window.addEventListener('unhandledrejection', onScriptError);
-    if (ko.isObservable(root.currentViewId)) S.subs.push(root.currentViewId.subscribe(function (id) { setActive(false, 'view:' + id); }));
+    if (ko.isObservable(root.currentViewId)) S.subs.push(root.currentViewId.subscribe(function (id) {
+      setActive(false, 'view:' + id);
+      if (S.historyPager) S.historyPager.refresh();
+    }));
     // Release the native list before Windows begins its close/navigation animations.
-    if (ko.isObservable(root.isLastShowHideEventShow)) S.subs.push(root.isLastShowHideEventShow.subscribe(function (visible) { if (!visible) setActive(false, 'window-hide'); }));
+    if (ko.isObservable(root.isLastShowHideEventShow)) S.subs.push(root.isLastShowHideEventShow.subscribe(function (visible) { if (!visible) { setActive(false, 'window-hide'); if (S.historyPager) S.historyPager.release(); } else if (S.historyPager) S.historyPager.refresh(); }));
     scanHistory();
     observer = new window.MutationObserver(scanHistory);
     observer.observe(document.getElementById('expanded-view-content-lists'), { childList: true, subtree: true });

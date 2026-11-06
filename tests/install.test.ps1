@@ -17,7 +17,7 @@ foreach ($line in @('Disabled=1','CustomKey=keep','maxItems=777','maxItemSizeMB=
 $backupFile = Get-ChildItem -LiteralPath (Join-Path $testRoot 'AppData\WinVPlusBackups') -Recurse -Filter 'winvplus-history-limit.ini' | Select-Object -First 1
 if (!$backupFile -or (Get-Content -LiteralPath $backupFile.FullName -Raw) -ne $config) { throw 'Exact prior config backup missing.' }
 $newIni = Get-Content -LiteralPath (Join-Path $mods 'winvplus-phrases.ini') -Raw
-if (!$newIni.Contains('Disabled=0') -or !$newIni.Contains('Version=0.3.0')) { throw 'New mod defaults incorrect.' }
+if (!$newIni.Contains('Disabled=0') -or !$newIni.Contains('Version=0.4.0')) { throw 'New mod defaults incorrect.' }
 if ($updated -notmatch '(?m)^LibraryFileName=(.+)\r?$') { throw 'Missing library filename.' }
 if (!(Test-Path -LiteralPath (Join-Path $mods ('64\' + $Matches[1].Trim())))) { throw 'Installed DLL missing.' }
 Write-Output 'PASS: isolated portable install, custom limits and disabled state preserved, exact config backup, versioned artifacts'
